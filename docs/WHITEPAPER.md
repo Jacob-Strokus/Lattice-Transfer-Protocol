@@ -54,9 +54,40 @@ is any discrete, self-contained unit of state:
 - A human identity credential
 
 An entity has three properties:
-1. **Content** — the raw information
-2. **Shape** — the schema/structure that gives content meaning
+1. **Content** — the raw information (arbitrary bytes)
+2. **Shape** — a canonical type descriptor that gives content meaning
 3. **Identity** — a unique, deterministic fingerprint derived from content + shape
+
+#### 1.1.1 Shape Specification
+
+The **shape** field is a canonical, case-insensitive string that describes the semantic type
+of the entity's content. It serves two purposes: (a) it allows the receiver to interpret the
+reconstructed bytes, and (b) it participates in the EntityID hash, so the same content
+committed with different declared shapes produces different entities.
+
+**Format.** Shape MUST be one of:
+
+| Category | Format | Examples |
+|----------|--------|----------|
+| IANA media type | `type/subtype` per [RFC 6838](https://datatracker.ietf.org/doc/html/rfc6838) | `text/plain`, `application/json`, `image/png` |
+| Parameterized media type | `type/subtype; param=value` per [RFC 2045 §5](https://datatracker.ietf.org/doc/html/rfc2045#section-5) | `text/plain; charset=utf-8`, `application/json; schema=urn:ltp:medical-record:v1` |
+| LTP extension type | `x-ltp/subtype` (reserved namespace for protocol-internal types) | `x-ltp/state-snapshot`, `x-ltp/credential-bundle` |
+
+**Canonicalization rules:**
+1. The `type` and `subtype` components are lowercased before hashing (per RFC 6838 §4.2)
+2. Parameters are sorted lexicographically by parameter name
+3. Whitespace around `;` and `=` delimiters is stripped
+4. The canonical form is encoded as UTF-8 bytes for inclusion in the EntityID hash
+
+**Interoperability invariant:** Two conforming LTP implementations that commit the same
+content with the same declared shape MUST produce identical EntityIDs. The canonicalization
+rules above guarantee this. An implementation that uses `TEXT/PLAIN` and one that uses
+`text/plain` canonicalize to the same bytes and produce the same hash.
+
+**Opaque content rule:** The shape is a *declared* type, not a *verified* type. LTP does
+not parse or validate content against its shape. A sender may commit a PNG image with shape
+`text/plain` — the EntityID will be valid, but the receiver will find the content
+uninterpretable as text. Shape is metadata, not a constraint.
 
 ### 1.2 The Entity Identity Function
 

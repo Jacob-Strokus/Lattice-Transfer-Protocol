@@ -1228,12 +1228,99 @@ class CommitmentNetwork:
 # ENTITY
 # ===========================================================================
 
+import re as _re
+
+# Shape validation regex: type/subtype with optional parameters
+# Accepts IANA media types (text/plain), parameterized types (text/plain; charset=utf-8),
+# and LTP extension types (x-ltp/state-snapshot).
+_SHAPE_PATTERN = _re.compile(
+    r'^[a-zA-Z0-9][a-zA-Z0-9!#$&\-^_.+]*'  # type
+    r'/[a-zA-Z0-9][a-zA-Z0-9!#$&\-^_.+]*'   # /subtype
+    r'(?:\s*;\s*[a-zA-Z0-9\-]+\s*=\s*[^\s;]+)*$'  # optional params
+)
+
+
+def canonicalize_shape(shape: str) -> str:
+    """
+    Canonicalize a shape string per LTP Whitepaper §1.1.1.
+
+    Rules:
+      1. type/subtype components are lowercased (RFC 6838 §4.2)
+      2. Parameters are sorted lexicographically by name
+      3. Whitespace around ; and = delimiters is stripped
+      4. Result is a deterministic UTF-8-safe string
+
+    Raises ValueError if shape does not match the required format.
+
+    Examples:
+      "TEXT/PLAIN"                      → "text/plain"
+      "text/plain; charset=utf-8"       → "text/plain;charset=utf-8"
+      "application/json; schema=v1; charset=utf-8"
+        → "application/json;charset=utf-8;schema=v1"
+    """
+    if not shape or not isinstance(shape, str):
+        raise ValueError(f"Shape must be a non-empty string, got: {shape!r}")
+
+    # Split type/subtype from parameters
+    parts = shape.split(';')
+    media_type = parts[0].strip().lower()
+
+    # Validate media type portion
+    if '/' not in media_type:
+        raise ValueError(
+            f"Invalid shape '{shape}': must be a media type (type/subtype). "
+            f"See LTP Whitepaper §1.1.1."
+        )
+
+    # Parse and sort parameters
+    params = []
+    for param in parts[1:]:
+        param = param.strip()
+        if not param:
+            continue
+        if '=' not in param:
+            raise ValueError(f"Invalid shape parameter (missing '='): '{param}'")
+        name, value = param.split('=', 1)
+        params.append((name.strip().lower(), value.strip()))
+
+    params.sort(key=lambda p: p[0])
+
+    # Reassemble canonical form
+    canonical = media_type
+    if params:
+        canonical += ';' + ';'.join(f"{n}={v}" for n, v in params)
+
+    # Validate against pattern
+    if not _SHAPE_PATTERN.match(canonical):
+        raise ValueError(
+            f"Invalid shape '{shape}' (canonical: '{canonical}'): "
+            f"does not match media type format. See LTP Whitepaper §1.1.1."
+        )
+
+    return canonical
+
+
 @dataclass
 class Entity:
-    """An entity to be transferred via LTP."""
+    """
+    An entity to be transferred via LTP.
+
+    Shape must be a valid media type per LTP Whitepaper §1.1.1:
+      - IANA media type: "text/plain", "application/json", "image/png"
+      - Parameterized: "text/plain; charset=utf-8"
+      - LTP extension: "x-ltp/state-snapshot"
+
+    Shape is automatically canonicalized (lowercased, params sorted,
+    whitespace stripped) to ensure interoperability: two implementations
+    that use different casing produce identical EntityIDs.
+    """
     content: bytes
     shape: str
     metadata: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        """Canonicalize shape on construction."""
+        self.shape = canonicalize_shape(self.shape)
 
     def compute_id(self, sender_id: str, timestamp: float) -> str:
         """Compute deterministic EntityID = H(content || shape || time || sender)."""
@@ -1717,7 +1804,7 @@ def demo():
 
     # Commit a fresh entity for the tamper test
     tamper_content = b"This content must be received EXACTLY as committed."
-    tamper_entity = Entity(content=tamper_content, shape="integrity-test")
+    tamper_entity = Entity(content=tamper_content, shape="x-ltp/integrity-test")
     tamper_eid, tamper_record, tamper_cek = protocol.commit(tamper_entity, alice, n=8, k=4)
     tamper_sealed = protocol.lattice(tamper_eid, tamper_record, tamper_cek, bob,
                                       access_policy={"type": "integrity-test"})
@@ -1850,7 +1937,7 @@ def demo():
 
     # Commit a fresh entity for the degraded test
     degraded_content = b"This entity survives catastrophic shard loss."
-    degraded_entity = Entity(content=degraded_content, shape="availability-test")
+    degraded_entity = Entity(content=degraded_content, shape="x-ltp/availability-test")
     entity_id, record, cek = protocol.commit(degraded_entity, alice, n=8, k=4)
     sealed_key = protocol.lattice(entity_id, record, cek, bob,
                                    access_policy={"type": "availability-test"})
@@ -2283,7 +2370,7 @@ def demo():
     collision_found = False
     for i in range(n_entities):
         random_content = os.urandom(64) + struct.pack('>I', i)
-        random_entity = Entity(content=random_content, shape="collision-test")
+        random_entity = Entity(content=random_content, shape="x-ltp/collision-test")
         eid = random_entity.compute_id("collision-tester", float(i))
         if eid in collision_set:
             collision_found = True
@@ -2309,7 +2396,7 @@ def demo():
     print("┌─ IMM VALIDATION 5: End-to-end immutability gate (signature-bound)")
 
     imm_test_content = b"The immutable truth that cannot be rewritten."
-    imm_test_entity = Entity(content=imm_test_content, shape="immutability-test")
+    imm_test_entity = Entity(content=imm_test_content, shape="x-ltp/immutability-test")
     imm_eid, imm_record, imm_cek = protocol.commit(imm_test_entity, alice, n=8, k=4)
 
     # Verify content_hash matches H(content)
