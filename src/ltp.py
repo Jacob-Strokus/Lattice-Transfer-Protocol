@@ -522,12 +522,59 @@ class ShardEncryptor:
       - Same CEK + different index → different ciphertext
       - Deterministic: same (CEK, shard, index) → same ciphertext
       - AEAD tag detects any modification by commitment nodes
+
+    SECURITY INVARIANT — CEK Uniqueness (Nonce Safety):
+      The nonce-as-index scheme is safe IF AND ONLY IF each CEK is unique per
+      entity. Since nonce = shard_index, two entities sharing the same CEK would
+      produce identical (key, nonce) pairs for corresponding shards, enabling
+      XOR-based plaintext recovery (catastrophic AEAD nonce reuse).
+
+      The CEK MUST be generated from a CSPRNG (os.urandom) for every commit.
+      CEK reuse across entities is a CATASTROPHIC failure mode — it leaks
+      plaintext via crib-dragging attacks on the keystream.
+
+      If the protocol ever supports entity updates (re-committing content under
+      the same entity_id), a FRESH CEK MUST be generated each time. The entity_id
+      will differ (due to timestamp/content change), but even if it didn't, the
+      CEK must be independently random.
     """
 
-    @staticmethod
-    def generate_cek() -> bytes:
-        """Generate a random 256-bit Content Encryption Key."""
-        return os.urandom(32)
+    # Track issued CEKs within this process to detect accidental reuse.
+    # This is a defense-in-depth runtime check, not a substitute for CSPRNG.
+    _issued_ceks: set = set()
+
+    @classmethod
+    def generate_cek(cls) -> bytes:
+        """Generate a random 256-bit Content Encryption Key from CSPRNG.
+
+        Returns a fresh 32-byte key from os.urandom (CSPRNG). Raises RuntimeError
+        if the generated key collides with a previously issued CEK in this process
+        (probability ~2^{-256}, effectively impossible — detection is defense-in-depth).
+        """
+        cek = os.urandom(32)
+        if cek in cls._issued_ceks:
+            raise RuntimeError(
+                "CRITICAL: CEK collision detected — CSPRNG may be compromised. "
+                "Aborting to prevent catastrophic nonce reuse."
+            )
+        cls._issued_ceks.add(cek)
+        return cek
+
+    @classmethod
+    def validate_cek(cls, cek: bytes) -> None:
+        """Validate a CEK meets security requirements.
+
+        Checks:
+          1. Correct length (32 bytes / 256 bits)
+          2. Not all-zero (degenerate key)
+          3. Not all-one (degenerate key)
+        """
+        if not isinstance(cek, bytes) or len(cek) != 32:
+            raise ValueError(f"CEK must be exactly 32 bytes, got {len(cek) if isinstance(cek, bytes) else type(cek).__name__}")
+        if cek == b'\x00' * 32:
+            raise ValueError("CEK is all-zero — degenerate key rejected")
+        if cek == b'\xff' * 32:
+            raise ValueError("CEK is all-one — degenerate key rejected")
 
     @staticmethod
     def _nonce(shard_index: int) -> bytes:
@@ -536,7 +583,12 @@ class ShardEncryptor:
 
     @classmethod
     def encrypt_shard(cls, cek: bytes, plaintext_shard: bytes, shard_index: int) -> bytes:
-        """Encrypt a shard with CEK. Returns ciphertext || 32-byte auth tag."""
+        """Encrypt a shard with CEK. Returns ciphertext || 32-byte auth tag.
+
+        Validates CEK before use. The nonce is deterministically derived from
+        shard_index, so CEK uniqueness is the SOLE barrier against nonce reuse.
+        """
+        cls.validate_cek(cek)
         return AEAD.encrypt(cek, plaintext_shard, cls._nonce(shard_index))
 
     @classmethod
@@ -1282,9 +1334,13 @@ class LTPProtocol:
         print(f"  [COMMIT] Erasure encoded → {n} shards (k={k} for reconstruction)")
         print(f"  [COMMIT] Plaintext shard size: {len(plaintext_shards[0]):,} bytes each")
 
-        # Step 2: Generate Content Encryption Key
+        # Step 2: Generate Content Encryption Key (CSPRNG — nonce safety invariant)
+        # SECURITY: Each entity MUST have a unique CEK. Since AEAD nonces are
+        # derived from shard_index, CEK uniqueness is the sole barrier against
+        # catastrophic nonce reuse. The CEK is generated from os.urandom (CSPRNG)
+        # and validated for degenerate values before use.
         cek = ShardEncryptor.generate_cek()
-        print(f"  [COMMIT] CEK generated: {cek.hex()[:16]}... (256-bit random)")
+        print(f"  [COMMIT] CEK generated: {cek.hex()[:16]}... (256-bit CSPRNG)")
 
         # Step 3: Encrypt each shard with CEK
         encrypted_shards = []

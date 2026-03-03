@@ -92,7 +92,7 @@ then each shard is encrypted with a random Content Encryption Key (CEK):
 
 ```
 plaintext_shards = ErasureEncode(entity, n, k)
-CEK = random(256 bits)
+CEK = CSPRNG(256 bits)     # MUST be fresh per entity — see invariant below
 encrypted_shards = [AEAD_Encrypt(CEK, shard, nonce=index) for index, shard in enumerate(plaintext_shards)]
 ```
 
@@ -104,6 +104,27 @@ Where:
 - Each shard is encrypted with AEAD (authenticated encryption) before distribution
 - Commitment nodes store **only ciphertext** — they cannot read shard content
 - Each encrypted shard is integrity-checked: `ShardHash = H(encrypted_shard || entity_id || shard_index)`
+
+**Security Invariant — CEK Uniqueness (Nonce Safety):**
+
+Each shard's AEAD nonce is deterministically derived from its shard index (`nonce = index`).
+This means the nonce domain is small and predictable. The scheme is safe because each
+(CEK, nonce) pair is used exactly once — guaranteed by the requirement that every entity
+receives a fresh, independently random CEK from a CSPRNG (e.g., `os.urandom`, `/dev/urandom`,
+`CryptGenRandom`).
+
+**CEK reuse across entities is a catastrophic failure mode.** If two entities share the same
+CEK, their corresponding shards (at the same index) are encrypted with identical (key, nonce)
+pairs. For XOR-based stream ciphers (and most AEAD constructions), this enables plaintext
+recovery via crib-dragging:
+
+$$c_1 \oplus c_2 = (p_1 \oplus \text{keystream}) \oplus (p_2 \oplus \text{keystream}) = p_1 \oplus p_2$$
+
+This invariant MUST hold even if the protocol evolves to support entity updates or
+re-commitment: each commit operation MUST generate a fresh CEK regardless of whether the
+content or entity_id has been seen before. Implementations SHOULD validate that the CEK is
+not degenerate (all-zero, all-one) and SHOULD track issued CEKs within a process as a
+defense-in-depth measure.
 
 #### 2.1.2 Distributed Shard Placement
 

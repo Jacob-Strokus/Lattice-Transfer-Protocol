@@ -319,6 +319,39 @@ theoretic).  $\blacksquare$
 >    k=4 shards: H(M|S_k) = 0 (full disclosure, exact match verified). One shard is the
 >    difference between zero information and complete reconstruction.
 
+### 4.3.1 CEK Uniqueness Invariant (Nonce Safety) ✅
+
+**Concern (Formal Review §4.4):** Each shard's AEAD nonce is derived from its shard index.
+This is safe only because each CEK is independently random per entity. If the same CEK were
+reused across two entities, corresponding shards would share identical (key, nonce) pairs,
+enabling XOR-based plaintext recovery:
+
+$$c_1 \oplus c_2 = p_1 \oplus p_2$$
+
+This is a catastrophic AEAD nonce reuse — the fundamental invariant underlying the entire
+shard encryption scheme.
+
+**Resolution:** The CEK uniqueness invariant is now explicitly stated in three places:
+
+1. **Whitepaper §2.1.1** — Added a formal "Security Invariant — CEK Uniqueness (Nonce Safety)"
+   block specifying that CEK MUST come from a CSPRNG, CEK reuse is catastrophic, and
+   re-commitment MUST generate a fresh CEK regardless of entity_id reuse.
+
+2. **PoC `ShardEncryptor` class** — Added three defense-in-depth mechanisms:
+   - `generate_cek()` now uses `os.urandom(32)` with process-level collision tracking
+     (raises `RuntimeError` on collision — probability ~$2^{-256}$, effectively impossible)
+   - `validate_cek()` rejects degenerate keys (all-zero, all-one, wrong length)
+   - `encrypt_shard()` calls `validate_cek()` before every encryption operation
+
+3. **PoC `commit()` method** — Comments explicitly document the nonce safety invariant
+   at the point where the CEK is generated.
+
+**Why this is sufficient:** The probability of `os.urandom` producing duplicate 32-byte
+values is $\frac{q^2}{2^{257}}$ where $q$ is the number of entities committed. Even at
+$q = 2^{64}$ entities (far beyond any realistic deployment), collision probability is
+$\approx 2^{-129}$ — computationally negligible. The runtime tracking is defense-in-depth
+against a compromised CSPRNG, not against birthday collisions.
+
 ### 4.4 Non-Repudiation (Signature Unforgeability)
 
 **Theorem:** Under the EUF-CMA (Existential Unforgeability under Chosen Message Attack)
