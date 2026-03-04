@@ -107,6 +107,29 @@ This identity is **permanent**. The same content committed by the same sender at
 logical moment always produces the same identity. Different moment = different entity. This
 is not a bug — it is the immutability guarantee.
 
+**Deduplication consequence.** Because EntityID includes `timestamp` and `sender_pubkey`,
+identical content committed by the same sender at different logical times produces different
+EntityIDs. The commitment network stores a distinct set of encrypted shards for each commit
+with no mechanism to detect or coalesce redundant payloads. For fan-out workflows (one commit,
+many receivers) this is irrelevant. For workflows that repeatedly commit identical content,
+storage costs accumulate linearly with commit count. See §6.4 for the cost model implication.
+
+**Optional ContentHash.** Deployments that require storage-layer deduplication without
+breaking immutability semantics may compute:
+
+```
+ContentHash = H(content || shape)
+```
+
+as an optional out-of-band field in the commitment record. ContentHash is NOT the entity's
+identity and does not participate in the EntityID computation or any security proof.
+It allows storage nodes to identify shards that encrypt identical plaintext.
+
+**Privacy tradeoff:** ContentHash enables any log observer to detect that two different
+senders committed the same content (by comparing ContentHash values). For sensitive
+deployments — where the fact that two parties hold the same data is itself confidential —
+ContentHash MUST NOT be included in the public commitment record.
+
 ---
 
 ## 2. The Three Phases of Transfer
@@ -136,6 +159,32 @@ Where:
 - Each shard is encrypted with AEAD (authenticated encryption) before distribution
 - Commitment nodes store **only ciphertext** — they cannot read shard content
 - Each encrypted shard is integrity-checked: `ShardHash = H(encrypted_shard || entity_id || shard_index)`
+
+**Reed-Solomon Canonical Parameters.** To guarantee interoperability — two conforming
+implementations MUST produce identical shards and identical Merkle roots for the same
+entity — the RS encoding is fully specified as follows:
+
+| Parameter | Value | Notes |
+|-----------|-------|-------|
+| Field | GF(2⁸) | 8-bit finite field |
+| Primitive polynomial | $x^8 + x^4 + x^3 + x^2 + 1$ (0x11d) | Standard GF(2⁸) construction; same as used in AES, ISA-L, BackBlaze |
+| Generator element | $\alpha = \texttt{0x02}$ | Primitive root of GF(2⁸) under 0x11d |
+| Evaluation points | $\{1,\, \alpha,\, \alpha^2,\, \ldots,\, \alpha^{n-1}\}$ | Powers of generator; row $i$ of encoding matrix has entries $[\alpha^{0 \cdot i}, \alpha^{1 \cdot i}, \ldots, \alpha^{(k-1) \cdot i}]$ |
+| Encoding matrix | Vandermonde: $V[i][j] = \alpha^{i \cdot j}$ for $i \in [0,n)$, $j \in [0,k)$ | Non-systematic; any $k$ rows are invertible (MDS property) |
+| Decoding | Gauss-Jordan elimination over GF(2⁸) | Select any $k$ available rows, invert $k \times k$ submatrix |
+| Shard size | $\lceil |$entity$| / k \rceil$ bytes, zero-padded to equal length | Entity is split into $k$ equal data chunks before encoding |
+
+The `algorithm` field in the commitment record (see §2.1.3) MUST be `"reed-solomon-gf256"`
+with the parameters above. Implementations MUST NOT use a different primitive polynomial,
+generator, or matrix construction and claim conformance with this identifier.
+
+**Interoperability test vector.** Encoding a 4-byte entity `[0x01, 0x02, 0x03, 0x04]`
+with $n=4$, $k=2$ under these parameters produces the following shards (in hex):
+- Shard 0 ($\alpha^0 = 1$): `0102`
+- Shard 1 ($\alpha^1 = 2$): `0x03 0x08`  *(GF(2⁸) multiplication: 2×01 XOR 1×02, 2×03 XOR 1×04)*
+- Any 2 of 4 shards reconstruct the original 4 bytes.
+
+*Implementations SHOULD validate against this test vector before deployment.*
 
 **Security Invariant — Nonce Derivation:**
 
@@ -188,7 +237,7 @@ commitment log (this can be a blockchain, a Merkle DAG, or any immutable append-
   "entity_id": "blake3:7f3a8b...",
   "sender": "ml-dsa-65:verification_key...",
   "shard_map_root": "blake3:merkle_root_of_encrypted_shard_hashes",
-  "encoding_params": { "n": 64, "k": 32, "algorithm": "reed-solomon-gf256" },
+  "encoding_params": { "n": 64, "k": 32, "algorithm": "reed-solomon-gf256", "gf_poly": "0x11d", "eval": "vandermonde-powers-of-0x02" },
   "shape_hash": "blake3:schema_hash...",
   "timestamp": 1740422400,
   "signature": "ml-dsa-65:sig...  (3,309 bytes, quantum-resistant)"
@@ -236,7 +285,7 @@ The lattice key is:
 - **Opaque** — an interceptor sees only random bytes (no metadata leaks)
 - **Post-quantum** — ML-KEM-768 resists both classical and quantum adversaries
 
-#### 2.2.2 Key Properties of Latticement
+#### 2.2.2 Key Properties of the Lattice Key
 
 The lattice key is **not the data**. It is the **proof of right to reconstruct**. This
 creates several remarkable properties:
@@ -367,7 +416,7 @@ In ZK mode, the commitment record replaces `entity_id` with a blinded identifier
   "mode": "zk",
   "blind_id":       "Poseidon(entity_id || r)   // r ← CSPRNG(256 bits), NOT published",
   "shard_map_root": "poseidon:merkle_root_of_encrypted_shard_hashes",
-  "encoding_params": { "n": 64, "k": 32, "algorithm": "reed-solomon-gf256" },
+  "encoding_params": { "n": 64, "k": 32, "algorithm": "reed-solomon-gf256", "gf_poly": "0x11d", "eval": "vandermonde-powers-of-0x02" },
   "shape":           "application/json",
   "timestamp":       1740422400,
   "zk_proof":        "...",   // Groth16 proof over R_ZK — see §3.2.2
@@ -488,6 +537,22 @@ reduces each to standard assumptions. We adopt the notation of Bellare and Rogaw
 $\mathcal{A}$ denotes a PPT (probabilistic polynomial time) adversary, $\mathsf{negl}(\lambda)$
 denotes a negligible function in security parameter $\lambda$, and $\mathsf{Adv}^{X}_{\mathcal{A}}$
 denotes $\mathcal{A}$'s advantage in game $X$.
+
+**Trust Model Assumption (applies to all theorems in this section).** All theorems below
+assume an honest append-only commitment log: once a commitment record is accepted at position
+$i$, no party can modify it or insert a different record at position $i$, and all honest
+participants observe a consistent log state. This is an idealization. In practice, the
+commitment log is implemented by one of the trust tiers described in §5.1.4 — ranging from
+a single trusted operator (full trust) to a CT-style multi-operator Merkle log (trust in at
+least one honest mirror) to a BFT replicated log ($> 2/3$ honest operators). The security
+guarantees of Theorems 1, 6, and 8 hold only to the extent that the chosen log implementation
+satisfies this assumption. See §5.1.4 for the conditions under which each implementation
+tier meets it, and for the consequences if it is violated.
+
+**Conditional restatement.** Where theorems reference the commitment log, they should be
+read as: *"Under the assumption that the commitment log satisfies append-only integrity and
+consistency (§5.1.4), the following holds..."* This conditionality is not restated in each
+theorem for brevity, but it is always present.
 
 #### 3.3.1 Entity Immutability (Collision Resistance)
 
@@ -1007,6 +1072,26 @@ layered mitigations:
    nearest replica is 100ms away, the node cannot re-fetch in time. The auditor records
    response latency; consistently near-deadline responses trigger escalated auditing.
 
+   **Calibrating T in practice.** The ideal T is deployment-specific and requires active
+   measurement:
+
+   - **Historical latency profiling.** During network bootstrap, and re-evaluated whenever
+     the node set changes significantly, auditors SHOULD measure pairwise RTT distributions
+     between known replica locations. A conservative target: set $T \leq P_{10}(\text{RTT}_{\text{nearest replica}}) - \epsilon$,
+     so that at least 90% of measured RTTs to any nearby replica exceed $T$. This ensures a
+     co-located but legitimately storing node passes comfortably, while a node that must
+     network-fetch is caught most of the time.
+
+   - **Adaptive bounds.** Auditors SHOULD track per-node response latency over time. A node
+     whose latency distribution shifts toward the $T$ boundary (e.g., P75 latency exceeds
+     $0.8T$) is flagged for escalated auditing even if it has not yet missed a deadline.
+
+   - **Variable network conditions.** RTTs vary with congestion, routing changes, and
+     hardware load. $T$ should be re-evaluated periodically (e.g., on a weekly basis) and
+     should be set conservatively: a false positive (honest node fails due to transient
+     latency spike) is recoverable; a false negative (outsourcing node passes due to a
+     tight $T$) is undetected.
+
 2. **Burst challenges.** Instead of one challenge per audit, the auditor issues $b$
    challenges for **random** (entity_id, shard_index) pairs simultaneously. The node must
    respond to all $b$ within the same window $T$. A node that stores legitimately performs
@@ -1020,12 +1105,20 @@ layered mitigations:
    This makes outsourcing economically irrational even if individual challenges can
    sometimes be passed dishonestly.
 
-**Honest limitation.** These measures raise the bar significantly but do NOT provide
-cryptographic proof-of-storage. A sufficiently resourced adversary with a co-located
-low-latency replica network could still outsource. For deployments requiring cryptographic
-storage guarantees, LTP recommends augmenting with proof-of-replication (PoRep) at the cost
-of SNARK overhead. For most deployments, time-bounded burst challenges with economic bonds
-provide a practical security level.
+**Honest limitation.** The time-bound $T$ is a **statistical deterrent**, not a cryptographic
+guarantee. Its effectiveness depends entirely on the gap between an outsourcing node's
+re-fetch latency and $T$:
+
+$$P(\text{catch outsourcing node}) \approx P\!\left(\text{RTT}_{\text{fetch}} + \frac{\text{shard\_size}}{\text{bandwidth}_{\text{fetch}}} > T\right)$$
+
+A node with a co-located proxy 5ms away trivially passes a $T = 50\text{ms}$ bound; a node
+re-fetching from a datacenter 200ms away is reliably caught. The expected detection rate is
+a function of the adversary's infrastructure, not a fixed security parameter. These measures
+raise the cost of outsourcing significantly but do NOT provide cryptographic proof-of-storage.
+For deployments requiring a cryptographic guarantee, LTP recommends augmenting with
+proof-of-replication (PoRep) at the cost of SNARK overhead (as in Filecoin's PoSt). For
+most deployments, time-bounded burst challenges with economic bonds provide a practical and
+operationally tractable deterrent.
 
 **Why this is simpler than Filecoin's Proof-of-Replication:**
 
@@ -1395,13 +1488,42 @@ $D$ (local shard fetches) + ~1,300 bytes (sealed key). Sender bandwidth is const
 
 $$T_{direct} = L_{SR} + \frac{D}{\text{bandwidth}_{SR}}$$
 
-$$T_{LTP} = \underbrace{\frac{1300}{\text{bandwidth}_{SR}}}_{\text{key (negligible)}} + \underbrace{\frac{D/k}{\text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
+$$T_{LTP} = \underbrace{\frac{1300}{\text{bandwidth}_{SR}}}_{\text{key (negligible)}} + \underbrace{\frac{D/k}{\alpha \cdot \text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
 
-When $\text{bandwidth}_{RN} \gg \text{bandwidth}_{SR}$ (receiver is near commitment nodes but far from
-sender), $T_{LTP} \ll T_{direct}$. This is the latency advantage.
+where $\alpha \in (0, 1]$ is a **parallelism efficiency factor** representing the fraction of
+theoretical parallel bandwidth actually achieved. The ideal case $\alpha = 1$ (full parallelism)
+requires dedicated per-shard connections with no receiver-side or node-side contention.
+In practice $\alpha < 1$ due to:
 
-When $\text{bandwidth}_{RN} \approx \text{bandwidth}_{SR}$ (everything is equidistant), $T_{LTP} \approx T_{direct}$
-but with the sender free to go offline.
+- **TCP connection overhead**: Each shard fetch requires a connection (or stream), adding
+  per-connection handshake latency, especially pronounced when $k$ is large.
+- **Node-side I/O scheduling**: If multiple receivers are fetching from the same commitment
+  node simultaneously, node disk I/O contention degrades throughput.
+- **Receiver bandwidth cap**: If $k \cdot \text{bandwidth}_{RN} > \text{bandwidth}_{receiver}$,
+  the receiver's uplink becomes the bottleneck and the parallel advantage is bounded by
+  $\text{bandwidth}_{receiver} / (D/k)$, not by node bandwidth.
+- **Straggler effect**: $T_{LTP}$ is determined by the *slowest* of the $k$ shard fetches.
+  Under load, tail latency can dominate.
+
+**Sensitivity to $\alpha$:**
+
+| Scenario | $\alpha$ | $T_{LTP}$ relative to ideal |
+|----------|----------|---------------------------|
+| Dedicated bandwidth, no contention | $\approx 1.0$ | Ideal |
+| Shared nodes, moderate load | $\approx 0.5$–$0.8$ | $1.25$–$2\times$ slower |
+| Receiver bandwidth-limited | $\approx D / (k \cdot \text{bandwidth}_{receiver})$ | Bottlenecked by receiver |
+| High-contention shared nodes | $\approx 0.2$–$0.4$ | $2.5$–$5\times$ slower |
+
+The latency advantage claimed by LTP holds when $\alpha \cdot \text{bandwidth}_{RN} \gg \text{bandwidth}_{SR}$.
+For small $\alpha$ (high contention deployments), the advantage narrows. Actual $\alpha$ should
+be measured empirically for each deployment topology before relying on the latency model.
+
+When $\text{bandwidth}_{RN} \gg \text{bandwidth}_{SR}$ and $\alpha$ is close to 1 (receiver near
+low-contention commitment nodes, far from sender), $T_{LTP} \ll T_{direct}$. This is the
+latency advantage.
+
+When $\alpha \cdot \text{bandwidth}_{RN} \approx \text{bandwidth}_{SR}$ (equidistant or high
+contention), $T_{LTP} \approx T_{direct}$ but with the sender free to go offline.
 
 **Where LTP wins honestly:**
 1. Fan-out: $N$ receivers for near-constant sender cost
@@ -1413,6 +1535,9 @@ but with the sender free to go offline.
 1. Single-transfer bandwidth: $r+1$ times worse than direct
 2. Storage: the commitment network stores $D \cdot r$ bytes persistently
 3. Complexity: three-phase protocol vs. one-phase direct send
+4. Deduplication: identical content committed at different times produces distinct entities
+   and distinct shard sets — no built-in coalescing across commits (see §1.2 for the optional
+   ContentHash mechanism and its privacy tradeoff)
 
 ---
 
@@ -1690,14 +1815,53 @@ Two distributed systems synchronize state by exchanging lattice keys. Each syste
 the other's state from the commitment network. This is faster than traditional replication because
 shards are fetched locally, and only the delta (new entity) needs materialization.
 
-### 9.5 Cross-Planetary Data Transfer
-On a Mars colony with 4-24 minute light delay to Earth: commitment nodes on Mars cache shards.
-A sender on Earth commits an entity. The ~1,300-byte sealed lattice key crosses the void
-once (4-24 minutes). The receiver on Mars materializes from Mars-local commitment nodes (which
-replicate shards during off-peak periods). Materialization time is bounded by Mars-local network
-speed, not Earth-Mars light delay. Note: initial shard replication to Mars nodes still incurs
-the light-delay cost — the advantage is that this is amortized across all Mars-side receivers
-and can happen asynchronously before any specific transfer.
+### 9.5 High-Latency Link Optimization (Illustrative Thought Experiment)
+
+*This section is a thought experiment illustrating two specific LTP properties —
+sender-independence and geographic optimization — rather than a practical deployment scenario.
+The infrastructure assumptions (Mars-local commitment nodes, inter-planetary shard
+pre-replication) are deployment choices, not protocol features.*
+
+**Scenario.** An Earth sender commits a 1 GB entity destined for multiple Mars-side receivers.
+Earth-Mars light delay is 20 minutes one-way; effective Earth-Mars bandwidth is 1 Mbps
+(a realistic deep-space link capacity). Mars-local bandwidth between receivers and Mars-local
+commitment nodes is 1 Gbps.
+
+**Direct transfer (without LTP) for $N$ receivers:**
+$$T_{\text{direct}} = 20\text{ min} + \frac{1\text{ GB}}{1\text{ Mbps}} \approx 20\text{ min} + 2.2\text{ hr per receiver}$$
+Each receiver independently pulls the full payload from Earth. Total Earth upload: $N \times 1\text{ GB}$.
+
+**LTP (with Mars-local commitment nodes):**
+- *Commit phase (once, asynchronous):* Sender distributes shards to Mars nodes. At 1 Mbps
+  and $r = 3$: $3\text{ GB} / 1\text{ Mbps} \approx 6.7\text{ hours}$ of Earth upload,
+  paid once regardless of $N$.
+- *Lattice phase (per receiver):* ~1,300-byte sealed key transmitted in $< 1\text{ s}$ +
+  20-minute light delay.
+- *Materialize phase (per receiver):* $1\text{ GB} / 1\text{ Gbps} = 8\text{ seconds}$
+  from Mars-local nodes.
+$$T_{\text{LTP per receiver}} \approx 20\text{ min (light delay)} + 8\text{ sec (local fetch)}$$
+
+**What this illustrates:**
+
+1. **Sender-independence:** After the commit phase completes, the Earth sender goes offline.
+   Materialization is driven entirely by receiver ↔ Mars-local-node bandwidth. The sender's
+   availability is decoupled from any specific transfer.
+
+2. **Geographic optimization:** Each receiver's materialization time is dominated by
+   Mars-local latency (8 seconds), not Earth-Mars latency (2.2 hours per receiver for
+   direct transfer). LTP relocates the bandwidth-intensive step from a high-latency
+   intercontinental link to a low-latency local one.
+
+**Break-even on bandwidth:** LTP uses $D(r + N)$ total system bytes versus direct's $DN$.
+LTP's extra commit cost is $D \times r$. At $r = 3$: break-even is $N > r = 3$ receivers —
+beyond 3 Mars-side receivers, LTP's total Earth upload ($3\text{ GB}$ once) is less than
+direct's ($N \times 1\text{ GB}$). At $N = 10$: LTP saves $7\text{ GB}$ of Earth upload.
+
+**What this does NOT claim.** LTP does not solve the physics of light delay — initial shard
+replication to Mars still traverses the 20-minute link. The advantage requires pre-populated
+Mars-local commitment nodes, which is an infrastructure deployment decision, not a protocol
+guarantee. The scenario is meaningful only when the commit cost is amortized across a
+sufficiently large receiver population (break-even: $N > r$).
 
 ---
 
