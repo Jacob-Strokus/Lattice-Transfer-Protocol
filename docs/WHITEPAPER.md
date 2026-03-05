@@ -1,21 +1,58 @@
+<div align="center">
+
 # LTP: Lattice Transfer Protocol
+
+### Whitepaper
+
+<br>
+
+*A data transfer protocol in which no data payload is transmitted between sender and receiver.*
+*The sender commits. The receiver materializes. No payload crosses the sender–receiver link.*
+
+<br>
+
+| **Version** | **Date** | **Status** | **Classification** |
+|:-----------:|:--------:|:----------:|:------------------:|
+| 0.1.0-draft | 2026-02-24 | Exploratory Design | Public |
+
+</div>
+
+<br>
 
 ---
 
-**Whitepaper**
+**Overview**
 
-*A data transfer protocol in which no data payload is transmitted between sender and receiver.*
+LTP inverts the data transfer paradigm. Rather than transmitting a payload from sender to
+receiver, the sender **commits** an immutable, content-addressed, erasure-coded entity to a
+distributed commitment layer and delivers a constant-size cryptographic **lattice key**
+(~1,300 bytes) to the receiver. The receiver **materializes** the entity from geographically
+nearby commitment nodes — achieving O(1) sender→receiver bandwidth independent of entity
+size, with full post-quantum security as a default.
 
-| | |
-|---|---|
-| **Version** | 0.1.0-draft |
-| **Date** | 2026-02-24 |
-| **Status** | Exploratory Design |
-| **Classification** | Public |
+**Core guarantees:**
+
+| Property | Guarantee | Primitive |
+|:---------|:----------|:----------|
+| Sender→receiver path | O(1) constant-size sealed key, independent of entity size | ML-KEM-768 (FIPS 203) |
+| Immutability | Content-addressed EntityID — any modification produces a different identity | BLAKE3-256 |
+| Threshold secrecy | Fewer than *k* shards reveal zero information about entity content | Information-theoretic |
+| Non-repudiation | Append-only signed commitment record on a Merkle log | ML-DSA-65 (FIPS 204) |
+| Post-quantum security | Standard mode fully PQ-safe — no X25519 or Ed25519 in the protocol | ML-KEM + ML-DSA + BLAKE3 |
+| ZK privacy mode | Hiding commitment for EntityID fingerprinting prevention | Groth16 / BLS12-381 ⚠ |
+
+> ⚠ **ZK mode is not post-quantum safe.** Groth16 over BLS12-381 is broken by Shor's
+> algorithm. Standard mode is fully post-quantum. See §3.2.4 for the planned upgrade path.
+
+**Keywords:** distributed systems · post-quantum cryptography · content-addressed storage ·
+erasure coding · capability-based access control · append-only audit logs · ML-KEM-768 ·
+ML-DSA-65 · BLAKE3 · Certificate Transparency · Reed-Solomon coding
 
 ---
 
 ## Table of Contents
+
+---
 
 - [Abstract](#abstract)
 - [Note on Terminology](#note-on-terminology)
