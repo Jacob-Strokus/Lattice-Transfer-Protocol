@@ -37,6 +37,13 @@ from distributed shards. The protocol achieves:
 - **Security without trust** — verification is mathematical, not institutional
 - **Geography-optimized materialization** — the receiver fetches shards from the nearest available nodes, converting a long-haul transfer into parallel local fetches
 
+> **⚠ ZK mode post-quantum warning:** Standard LTP is fully post-quantum — ML-KEM-768
+> (FIPS 203), ML-DSA-65 (FIPS 204), BLAKE3-256, and information-theoretic erasure coding;
+> no classical-only primitives. ZK transfer mode (§3.2) uses Groth16 over BLS12-381, which
+> is vulnerable to Shor's algorithm and does **not** provide quantum-resistant hiding. **ZK
+> mode MUST NOT be used in deployments with a quantum-adversary threat model.** The planned
+> upgrade path is a STARK or lattice-based proof system (§3.2.4, §10 Open Question 8).
+
 ---
 
 ## 1. The Ontology of Data Transfer
@@ -424,7 +431,7 @@ whereas direct transfer costs O(entity × receiver_count).
 | Sender denies transfer occurred | Commitment record is on immutable append-only log with sender's signature |
 | Receiver claims different data was sent | Entity ID is deterministic hash of content; both parties can verify |
 | Replay attack (re-use lattice key) | Access policy can enforce one-time materialization; commitment nodes track access |
-| Quantum computing threat | **Full post-quantum security**: ML-KEM-768 (FIPS 203) for key encapsulation, ML-DSA-65 (FIPS 204) for signatures, BLAKE3-256 for hashing (quantum-resistant; BLAKE2b-256 is an alternative with identical security parameters), erasure coding is information-theoretic (quantum-immune). No X25519 or Ed25519 in the protocol. |
+| Quantum computing threat | **Standard mode: fully post-quantum** — ML-KEM-768 (FIPS 203), ML-DSA-65 (FIPS 204), BLAKE3-256 (quantum-resistant; BLAKE2b-256 is equivalent), information-theoretic erasure coding; no X25519 or Ed25519. **ZK mode: NOT quantum-resistant** — Groth16 over BLS12-381 is broken by Shor's algorithm. ZK mode MUST NOT be used under a quantum-adversary threat model (see §3.2.4 and Abstract warning). |
 
 ### 3.2 Zero-Knowledge Transfer Mode
 
@@ -546,11 +553,24 @@ bound of Theorem 5 holds unconditionally under ZK mode.
    PLONK (universal setup) or STARKs (no setup) are alternatives with larger proofs (~500 bytes
    and ~20–200 KB respectively).
 
-2. **Post-quantum status.** Groth16 relies on elliptic curve pairings, which are broken by
-   Shor's algorithm. ZK mode as specified does NOT provide quantum-resistant hiding. A
-   post-quantum alternative — a STARK over a post-quantum hash, or a lattice-based proof
-   system once standardized — should replace Groth16 for long-term quantum security.
-   This is an open question (§10, Open Question 8).
+2. **Post-quantum status.** Groth16 relies on bilinear pairings over BLS12-381, which are
+   broken by Shor's algorithm in polynomial time on a sufficiently large quantum computer.
+   ZK mode as specified does **NOT** provide quantum-resistant hiding. **ZK mode MUST NOT
+   be used in deployments with a quantum-adversary threat model.** Standard LTP (without ZK
+   mode) is fully post-quantum; the PQ gap is isolated to the privacy-enhanced mode only.
+
+   Planned post-quantum upgrade path:
+   - **Near-term (STARK):** Replace Groth16 with a hash-based STARK (e.g., over BLAKE3 or
+     Poseidon). No trusted setup required; security reduces to collision resistance of the
+     hash function. Proof sizes grow to ~20–200 KB.
+   - **Medium-term (lattice ZK):** Lattice-based proof systems (e.g., Ligero++, Spartan
+     over a PQ-safe hash) may yield smaller proofs. No NIST-standardized lattice-based ZK
+     system exists as of this writing.
+
+   Until a post-quantum ZK instantiation is standardized and integrated, deployments
+   requiring both content-privacy (hiding) and quantum resistance SHOULD forgo ZK mode and
+   accept the EntityID fingerprinting limitation of §3.3.3, mitigated by ensuring entity
+   content has sufficient min-entropy (§3.3.3 guidance). See §10, Open Question 8.
 
 3. **Content-property proofs.** R_ZK proves commitment consistency only, not content
    constraints. Application-layer predicates ("entity_content is valid JSON with `amount ∈
@@ -1642,7 +1662,7 @@ contention), $T_{LTP} \approx T_{direct}$ but with the sender free to go offline
 | Capability bound to receiver identity | No | No | No | No | No | **Yes (ML-KEM)** |
 | Forward secrecy (PQ) | TLS layer | No | No | No | No | **Yes (ML-KEM)** |
 | PQ signatures on commitments | No | No | No | No | No | **Yes (ML-DSA)** |
-| ZK privacy mode | No | No | No | No | No | **Yes** |
+| ZK privacy mode | No | No | No | No | No | **Yes†** |
 | Survives sender going offline | No | If pinned | If seeded | **Yes** | **Yes** | **Yes** |
 | Receiver proximity optimization | No | Partial | Partial | No | Partial | **Yes** |
 | Deterministic shard placement | No | DHT | DHT peers | Server-assigned | Server-assigned | **Consistent hash** |
@@ -1651,9 +1671,13 @@ contention), $T_{LTP} \approx T_{direct}$ but with the sender free to go offline
 | **Production deployment maturity** | Ubiquitous | Production | Ubiquitous | Limited | Production | **Research prototype** |
 | **Single-transfer overhead** | Minimal | Low | Low | Moderate | Moderate | **High (commit + lattice + materialize round-trips)** |
 
+† ZK privacy mode uses Groth16 over BLS12-381, which is **not post-quantum safe** (broken by
+Shor's algorithm). Standard mode provides full post-quantum security. ZK mode MUST NOT be
+used under a quantum-adversary threat model. See §3.2.4 and the Abstract warning.
+
 **Reading guide:** LTP's unique cells (only LTP has "Yes") are: O(1) sender→receiver path,
 receiver-bound capabilities, per-message PQ forward secrecy, PQ-signed append-only audit log,
-and ZK privacy mode. The encrypted storage, erasure coding, and capability-based access that
+and ZK privacy mode (standard mode only is fully PQ-safe). The encrypted storage, erasure coding, and capability-based access that
 LTP shares with Tahoe-LAFS and Storj are acknowledged as prior art — see Section 8. The final
 three rows reflect dimensions where LTP is weakest: LTP's three-phase design introduces
 significant protocol complexity compared to point-to-point alternatives; it is currently a
