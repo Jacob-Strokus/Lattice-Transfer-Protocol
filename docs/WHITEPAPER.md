@@ -412,9 +412,8 @@ materialize phase downloads O(entity) from it. LTP does not eliminate bandwidth;
 - The commit-phase bandwidth is amortized: committed once, materialized by many receivers
 
 The win is not "less bandwidth" — it is **faster perceived transfer** via parallelism,
-geographic locality, and sender-independence. For fan-out scenarios (one sender, many
-receivers), the amortized cost approaches O(entity) total regardless of receiver count,
-whereas direct transfer costs O(entity × receiver_count).
+geographic locality, and sender-independence. For the formal bandwidth model, fan-out
+break-even analysis, and latency equations, see §6.4.
 
 ---
 
@@ -1503,16 +1502,8 @@ The sealed lattice key is ~1,300 bytes (increased from ~240 bytes pre-quantum du
 ML-KEM-768 ciphertext overhead — the honest cost of quantum resistance). Its transmission
 is near-instantaneous on any network. Shard fetching is parallelized from the nearest nodes.
 
-**What this means precisely:**
-- The sender→receiver latency is reduced to O(1) (the key is constant-size)
-- The materialization latency depends on the receiver's proximity to commitment nodes
-- If commitment nodes exist near the receiver, effective latency approaches local RTT
-- If no nearby nodes exist, shard fetching still incurs geographic latency
-
-**What this does NOT mean:** Total time is not "near-instantaneous" for large entities.
-The receiver still downloads O(entity) bytes of encrypted shards. The advantage is that
-this download is from *nearby nodes* in parallel, not from a distant sender over a single
-path.
+The bottleneck relocation principle is explained in §2.3.2; the formal latency equations
+and sensitivity analysis are in §6.4.
 
 ### 6.2 Geographic Distance
 
@@ -1530,10 +1521,8 @@ Subsequent materializations by any receiver anywhere draw from *nearby nodes*.
 
 **Honest tradeoff:** The commit phase requires distributing O(entity × replication) bytes
 across the global network. For a single sender → single receiver transfer, total system
-bandwidth is higher than direct transfer. The advantage appears in:
-- **Fan-out:** one commit, many receivers — amortized cost per receiver approaches zero
-- **Latency:** receiver-local fetches vs. sender-distance fetches
-- **Sender-independence:** sender can go offline after commit
+bandwidth is higher than direct transfer. For the full cost model, break-even analysis, and
+"where LTP wins / loses honestly," see §6.4.
 
 ### 6.3 Computing Power
 
