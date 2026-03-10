@@ -39,7 +39,7 @@ class ShardEncryptor:
     """
 
     # Track issued CEKs within this process to detect accidental reuse.
-    _issued_ceks: set = set()
+    _issued_ceks: set[bytes] = set()
 
     @classmethod
     def generate_cek(cls) -> bytes:
@@ -94,3 +94,8 @@ class ShardEncryptor:
     ) -> bytes:
         """Decrypt a shard with CEK. Raises ValueError if tampered."""
         return AEAD.decrypt(cek, encrypted_shard, cls._nonce(cek, entity_id, shard_index))
+
+    @classmethod
+    def reset_poc_state(cls) -> None:
+        """Clear PoC simulation state. Call between tests for isolation."""
+        cls._issued_ceks.clear()

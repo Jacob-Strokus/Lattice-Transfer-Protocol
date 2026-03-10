@@ -152,3 +152,8 @@ class SealedBox:
 
         del shared_secret
         return plaintext
+
+    @classmethod
+    def reset_poc_state(cls) -> None:
+        """Clear PoC simulation state. Call between tests for isolation."""
+        cls._PoC_encaps_table.clear()

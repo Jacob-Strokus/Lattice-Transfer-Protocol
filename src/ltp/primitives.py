@@ -20,8 +20,15 @@ import hashlib
 import hmac as hmac_mod
 import os
 import struct
+import warnings
 
 __all__ = ["H", "H_bytes", "AEAD", "MLKEM", "MLDSA"]
+
+warnings.warn(
+    "LTP is using PoC cryptographic simulations (BLAKE2b-HMAC). "
+    "Do NOT use in production — replace with FIPS 203/204 implementations.",
+    stacklevel=1,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -317,3 +324,9 @@ class MLDSA:
         if expected is None:
             return False
         return hmac_mod.compare_digest(expected, signature)
+
+    @classmethod
+    def reset_poc_state(cls) -> None:
+        """Clear PoC simulation state. Call between tests for isolation."""
+        cls._PoC_sk_to_vk.clear()
+        cls._PoC_sig_table.clear()

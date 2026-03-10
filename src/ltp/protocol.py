@@ -13,6 +13,7 @@ Post-quantum security model (Option C + ML-KEM + ML-DSA):
 from __future__ import annotations
 
 import json
+import logging
 import struct
 import time
 from typing import Optional
@@ -24,6 +25,8 @@ from .keypair import KeyPair
 from .lattice import LatticeKey
 from .primitives import H, MLKEM, MLDSA
 from .shards import ShardEncryptor
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["LTPProtocol"]
 
@@ -77,16 +80,16 @@ class LTPProtocol:
         shape_hash = H(entity.shape.encode())
         self._entity_sizes[entity_id] = len(entity.content)
 
-        print(f"  [COMMIT] Entity ID: {entity_id[:16]}...")
-        print(f"  [COMMIT] Content size: {len(entity.content):,} bytes")
+        logger.info("[COMMIT] Entity ID: %s...", entity_id[:16])
+        logger.info("[COMMIT] Content size: %s bytes", f"{len(entity.content):,}")
 
         plaintext_shards = ErasureCoder.encode(entity.content, n, k)
-        print(f"  [COMMIT] Erasure encoded → {n} shards (k={k} for reconstruction)")
-        print(f"  [COMMIT] Plaintext shard size: {len(plaintext_shards[0]):,} bytes each")
+        logger.info("[COMMIT] Erasure encoded → %d shards (k=%d for reconstruction)", n, k)
+        logger.info("[COMMIT] Plaintext shard size: %s bytes each", f"{len(plaintext_shards[0]):,}")
 
         # SECURITY: Each entity MUST have a unique CEK (see whitepaper §2.1.1).
         cek = ShardEncryptor.generate_cek()
-        print(f"  [COMMIT] CEK generated: {cek.hex()[:16]}... (256-bit CSPRNG)")
+        logger.info("[COMMIT] CEK generated: %s... (256-bit CSPRNG)", cek.hex()[:16])
 
         encrypted_shards = [
             ShardEncryptor.encrypt_shard(cek, entity_id, shard, i)
@@ -94,14 +97,14 @@ class LTPProtocol:
         ]
 
         overhead = len(encrypted_shards[0]) - len(plaintext_shards[0])
-        print(
-            f"  [COMMIT] Shards encrypted (AEAD): {len(encrypted_shards[0]):,} bytes "
-            f"each (+{overhead}B auth tag)"
+        logger.info(
+            "[COMMIT] Shards encrypted (AEAD): %s bytes each (+%dB auth tag)",
+            f"{len(encrypted_shards[0]):,}", overhead,
         )
 
         shard_map_root = self.network.distribute_encrypted_shards(entity_id, encrypted_shards)
-        print(f"  [COMMIT] Encrypted shards → {len(self.network.nodes)} commitment nodes")
-        print(f"  [COMMIT]   Nodes store CIPHERTEXT ONLY (cannot read content)")
+        logger.info("[COMMIT] Encrypted shards → %d commitment nodes", len(self.network.nodes))
+        logger.info("[COMMIT]   Nodes store CIPHERTEXT ONLY (cannot read content)")
 
         content_hash = H(entity.content)
         record = CommitmentRecord(
@@ -125,10 +128,10 @@ class LTPProtocol:
         sig_size = len(record.signature)
 
         commitment_ref = self.network.log.append(record)
-        print(f"  [COMMIT] Record written to log (ref: {commitment_ref[:16]}...)")
-        print(f"  [COMMIT]   Log contains: entity_id, Merkle root, encoding params")
-        print(f"  [COMMIT]   Log does NOT contain: shard_ids, shard content, CEK")
-        print(f"  [COMMIT]   ML-DSA-65 signature: {sig_size:,} bytes (quantum-resistant)")
+        logger.info("[COMMIT] Record written to log (ref: %s...)", commitment_ref[:16])
+        logger.info("[COMMIT]   Log contains: entity_id, Merkle root, encoding params")
+        logger.info("[COMMIT]   Log does NOT contain: shard_ids, shard content, CEK")
+        logger.info("[COMMIT]   ML-DSA-65 signature: %s bytes (quantum-resistant)", f"{sig_size:,}")
 
         return entity_id, record, cek
 
@@ -170,18 +173,18 @@ class LTPProtocol:
         sealed = key.seal(receiver_keypair.ek)
         entity_size = self._entity_sizes.get(entity_id, 0)
 
-        print(f"  [LATTICE] Receiver: {receiver_keypair.label} ({receiver_keypair.pub_hex})")
-        print(f"  [LATTICE] Inner payload: {inner_size} bytes")
-        print(f"  [LATTICE]   Contains: entity_id + CEK + commitment_ref + policy")
-        print(f"  [LATTICE]   REMOVED: shard_ids, encoding_params, sender_id")
-        print(f"  [LATTICE] Sealed via ML-KEM-768: {len(sealed):,} bytes")
-        print(f"  [LATTICE]   kem_ciphertext: {MLKEM.CT_SIZE} bytes (fresh encapsulation)")
-        print(f"  [LATTICE]   nonce: 16 bytes | aead_tag: 32 bytes")
-        print(f"  [LATTICE]   Forward secrecy: shared_secret zeroized after AEAD encrypt")
+        logger.info("[LATTICE] Receiver: %s (%s)", receiver_keypair.label, receiver_keypair.pub_hex)
+        logger.info("[LATTICE] Inner payload: %d bytes", inner_size)
+        logger.info("[LATTICE]   Contains: entity_id + CEK + commitment_ref + policy")
+        logger.info("[LATTICE]   REMOVED: shard_ids, encoding_params, sender_id")
+        logger.info("[LATTICE] Sealed via ML-KEM-768: %s bytes", f"{len(sealed):,}")
+        logger.info("[LATTICE]   kem_ciphertext: %d bytes (fresh encapsulation)", MLKEM.CT_SIZE)
+        logger.info("[LATTICE]   nonce: 16 bytes | aead_tag: 32 bytes")
+        logger.info("[LATTICE]   Forward secrecy: shared_secret zeroized after AEAD encrypt")
         if entity_size > 0:
-            print(
-                f"  [LATTICE] Entity: {entity_size:,}B → Key: {len(sealed):,}B "
-                f"({entity_size / len(sealed):.1f}x ratio)"
+            logger.info(
+                "[LATTICE] Entity: %sB → Key: %sB (%.1fx ratio)",
+                f"{entity_size:,}", f"{len(sealed):,}", entity_size / len(sealed),
             )
 
         return sealed
@@ -207,59 +210,59 @@ class LTPProtocol:
         Returns: entity content bytes, or None on failure.
         """
         label = receiver_keypair.label
-        print(f"  [MATERIALIZE] Receiver '{label}' beginning materialization...")
-        print(f"  [MATERIALIZE] Sealed key size: {len(sealed_key)} bytes")
+        logger.info("[MATERIALIZE] Receiver '%s' beginning materialization...", label)
+        logger.info("[MATERIALIZE] Sealed key size: %d bytes", len(sealed_key))
 
         # Step 1: Unseal the lattice key
         try:
             key = LatticeKey.unseal(sealed_key, receiver_keypair)
         except ValueError as e:
-            print(f"  [MATERIALIZE] ✗ UNSEAL FAILED: {e}")
+            logger.warning("[MATERIALIZE] UNSEAL FAILED: %s", e)
             return None
 
-        print(f"  [MATERIALIZE] ✓ Key unsealed with private key")
-        print(f"  [MATERIALIZE]   Entity ID: {key.entity_id[:16]}...")
-        print(f"  [MATERIALIZE]   CEK recovered: {key.cek.hex()[:16]}...")
+        logger.info("[MATERIALIZE] Key unsealed with private key")
+        logger.info("[MATERIALIZE]   Entity ID: %s...", key.entity_id[:16])
+        logger.info("[MATERIALIZE]   CEK recovered: %s...", key.cek.hex()[:16])
 
         # Step 2: Fetch commitment record
         record = self.network.log.fetch(key.entity_id)
         if record is None:
-            print(f"  [MATERIALIZE] ✗ Commitment not found for {key.entity_id[:16]}...")
+            logger.warning("[MATERIALIZE] Commitment not found for %s...", key.entity_id[:16])
             return None
-        print(f"  [MATERIALIZE] ✓ Commitment record found in log")
+        logger.info("[MATERIALIZE] Commitment record found in log")
 
         # Step 3: Verify commitment reference
         record_ref = H(json.dumps(record.to_dict(), sort_keys=True).encode())
         if record_ref != key.commitment_ref:
-            print(f"  [MATERIALIZE] ✗ Commitment reference MISMATCH (tampered?)")
+            logger.warning("[MATERIALIZE] Commitment reference MISMATCH (tampered?)")
             return None
-        print(f"  [MATERIALIZE] ✓ Commitment reference verified")
+        logger.info("[MATERIALIZE] Commitment reference verified")
 
         # Step 4: Verify ML-DSA-65 signature
         sender_kp = self._sender_keypairs.get(record.sender_id)
         if sender_kp is None:
-            print(f"  [MATERIALIZE] ✗ Sender '{record.sender_id}' not found in registry")
+            logger.warning("[MATERIALIZE] Sender '%s' not found in registry", record.sender_id)
             return None
         if not record.verify_signature(sender_kp.vk):
-            print(f"  [MATERIALIZE] ✗ ML-DSA signature INVALID — commitment record rejected")
+            logger.warning("[MATERIALIZE] ML-DSA signature INVALID — commitment record rejected")
             return None
-        print(f"  [MATERIALIZE] ✓ ML-DSA-65 signature verified (sender '{record.sender_id}')")
+        logger.info("[MATERIALIZE] ML-DSA-65 signature verified (sender '%s')", record.sender_id)
 
         # Step 5: Read encoding params from record
         n = record.encoding_params["n"]
         k = record.encoding_params["k"]
-        print(f"  [MATERIALIZE] Encoding: n={n}, k={k} (from commitment record)")
+        logger.info("[MATERIALIZE] Encoding: n=%d, k=%d (from commitment record)", n, k)
 
         # Step 6: Fetch all n shards (so AEAD can reject bad ones; erasure fills gaps)
-        print(f"  [MATERIALIZE] Deriving shard locations from entity_id + index...")
-        print(f"  [MATERIALIZE] Fetching up to {n} encrypted shards (need {k} valid)...")
+        logger.info("[MATERIALIZE] Deriving shard locations from entity_id + index...")
+        logger.info("[MATERIALIZE] Fetching up to %d encrypted shards (need %d valid)...", n, k)
 
         encrypted_shards = self.network.fetch_encrypted_shards(key.entity_id, n, n)
 
         if len(encrypted_shards) < k:
-            print(f"  [MATERIALIZE] ✗ Only fetched {len(encrypted_shards)}/{k} shards")
+            logger.warning("[MATERIALIZE] Only fetched %d/%d shards", len(encrypted_shards), k)
             return None
-        print(f"  [MATERIALIZE] ✓ Fetched {len(encrypted_shards)} encrypted shards")
+        logger.info("[MATERIALIZE] Fetched %d encrypted shards", len(encrypted_shards))
 
         # Step 7: Decrypt each shard with CEK (AEAD rejects tampered shards)
         plaintext_shards: dict[int, bytes] = {}
@@ -269,28 +272,26 @@ class LTPProtocol:
                     key.cek, key.entity_id, enc_shard, i
                 )
             except ValueError as e:
-                print(
-                    f"  [MATERIALIZE] ⚠ Shard {i}: AEAD authentication FAILED — {e} (skipping)"
-                )
+                logger.warning("[MATERIALIZE] Shard %d: AEAD authentication FAILED — %s (skipping)", i, e)
 
         tampered_count = len(encrypted_shards) - len(plaintext_shards)
         if len(plaintext_shards) < k:
-            print(
-                f"  [MATERIALIZE] ✗ Only {len(plaintext_shards)}/{k} shards decrypted "
-                f"({tampered_count} rejected by AEAD)"
+            logger.warning(
+                "[MATERIALIZE] Only %d/%d shards decrypted (%d rejected by AEAD)",
+                len(plaintext_shards), k, tampered_count,
             )
             return None
-        print(f"  [MATERIALIZE] ✓ {len(plaintext_shards)} shards decrypted with CEK")
+        logger.info("[MATERIALIZE] %d shards decrypted with CEK", len(plaintext_shards))
         if tampered_count > 0:
-            print(
-                f"  [MATERIALIZE]   ⚠ {tampered_count} shard(s) REJECTED by AEAD tag verification"
+            logger.warning(
+                "[MATERIALIZE]   %d shard(s) REJECTED by AEAD tag verification", tampered_count,
             )
         else:
-            print(f"  [MATERIALIZE]   AEAD tags verified — no shard tampering detected")
+            logger.info("[MATERIALIZE]   AEAD tags verified — no shard tampering detected")
 
         # Step 8: Erasure decode
         entity_content = ErasureCoder.decode(plaintext_shards, n, k)
-        print(f"  [MATERIALIZE] ✓ Entity reconstructed ({len(entity_content):,} bytes)")
+        logger.info("[MATERIALIZE] Entity reconstructed (%s bytes)", f"{len(entity_content):,}")
 
         # Step 9: Verify full EntityID (end-to-end content integrity, whitepaper §2.3.1)
         # Defends against commitment record substitution attacks.
@@ -301,15 +302,15 @@ class LTPProtocol:
             + sender_kp.vk
         )
         if expected_entity_id != key.entity_id:
-            print(f"  [MATERIALIZE] ✗ EntityID MISMATCH — reconstructed content differs!")
-            print(f"  [MATERIALIZE]   Expected: {key.entity_id[:16]}...")
-            print(f"  [MATERIALIZE]   Got:      {expected_entity_id[:16]}...")
-            print(f"  [MATERIALIZE]   Entity is REJECTED (immutability violation attempt)")
+            logger.warning("[MATERIALIZE] EntityID MISMATCH — reconstructed content differs!")
+            logger.warning("[MATERIALIZE]   Expected: %s...", key.entity_id[:16])
+            logger.warning("[MATERIALIZE]   Got:      %s...", expected_entity_id[:16])
+            logger.warning("[MATERIALIZE]   Entity is REJECTED (immutability violation attempt)")
             return None
-        print(
-            f"  [MATERIALIZE] ✓ EntityID verified: "
-            f"H(content‖shape‖ts‖vk) = {expected_entity_id[:16]}..."
+        logger.info(
+            "[MATERIALIZE] EntityID verified: H(content||shape||ts||vk) = %s...",
+            expected_entity_id[:16],
         )
-        print(f"  [MATERIALIZE] ✓ MATERIALIZATION COMPLETE")
+        logger.info("[MATERIALIZE] MATERIALIZATION COMPLETE")
 
         return entity_content

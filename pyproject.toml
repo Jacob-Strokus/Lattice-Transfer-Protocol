@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.backends._legacy:_Backend"
+
+[project]
+name = "ltp"
+version = "3.0.0"
+description = "Lattice Transfer Protocol — post-quantum cryptographic data transfer"
+readme = "README.md"
+license = "MIT"
+requires-python = ">=3.10"
+# Zero external dependencies for core library (stdlib only).
+# Production replacements (ML-KEM, ML-DSA, XChaCha20-Poly1305) will add:
+#   liboqs / pqcrypto, libsodium / pynacl
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]

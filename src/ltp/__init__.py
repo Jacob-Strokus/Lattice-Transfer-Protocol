@@ -47,6 +47,20 @@ from .commitment import (
 from .lattice import LatticeKey
 from .protocol import LTPProtocol
 
+
+def reset_poc_state() -> None:
+    """Reset all PoC simulation state across modules.
+
+    Call this between tests or when you need fresh state. Clears:
+      - MLDSA signature lookup tables
+      - SealedBox encapsulation lookup tables
+      - ShardEncryptor issued CEK tracking set
+    """
+    MLDSA.reset_poc_state()
+    SealedBox.reset_poc_state()
+    ShardEncryptor.reset_poc_state()
+
+
 __all__ = [
     # Primitives
     "H",
@@ -74,4 +88,6 @@ __all__ = [
     "LatticeKey",
     # Protocol
     "LTPProtocol",
+    # Utilities
+    "reset_poc_state",
 ]

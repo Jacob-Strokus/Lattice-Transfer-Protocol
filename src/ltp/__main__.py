@@ -20,6 +20,7 @@ Executes the full LTP transfer demonstration including:
 from __future__ import annotations
 
 import json
+import logging
 import os
 import struct
 import sys
@@ -38,6 +39,11 @@ from . import (
 
 def demo() -> None:
     """Run a full LTP transfer demo with post-quantum security."""
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+    )
 
     print("=" * 74)
     print("  LATTICE TRANSFER PROTOCOL (LTP) v3")
