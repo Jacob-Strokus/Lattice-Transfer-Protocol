@@ -16,6 +16,7 @@ Production replacement:
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import hmac as hmac_mod
 import os
@@ -23,6 +24,10 @@ import struct
 import warnings
 
 __all__ = ["H", "H_bytes", "AEAD", "MLKEM", "MLDSA"]
+
+# Maximum entries in PoC simulation lookup tables before LRU eviction.
+# Prevents unbounded memory growth in long-running processes.
+_POC_TABLE_MAX = 10_000
 
 warnings.warn(
     "LTP is using PoC cryptographic simulations (BLAKE2b-HMAC). "
@@ -161,10 +166,10 @@ class MLKEM:
     CT_SIZE = 1088   # Ciphertext size (bytes)
     SS_SIZE = 32     # Shared secret size (bytes)
 
-    # PoC: maps dk_fingerprint → ek (populated by keygen)
-    _PoC_dk_to_ek: dict[str, bytes] = {}
-    # PoC: maps (ek_fingerprint, ct_hash) → shared_secret (populated by encaps)
-    _PoC_encaps_table: dict[tuple[str, str], bytes] = {}
+    # PoC: maps dk_fingerprint → ek (populated by keygen, LRU-bounded)
+    _PoC_dk_to_ek: collections.OrderedDict[str, bytes] = collections.OrderedDict()
+    # PoC: maps (ek_fingerprint, ct_hash) → shared_secret (populated by encaps, LRU-bounded)
+    _PoC_encaps_table: collections.OrderedDict[tuple[str, str], bytes] = collections.OrderedDict()
 
     @classmethod
     def keygen(cls) -> tuple[bytes, bytes]:
@@ -185,9 +190,11 @@ class MLKEM:
             ek_material.extend(H_bytes(seed + struct.pack('>I', i) + b"mlkem-ek"))
         ek = bytes(ek_material[:cls.EK_SIZE])
 
-        # PoC: store dk→ek binding for decapsulation lookup
+        # PoC: store dk→ek binding for decapsulation lookup (LRU-bounded)
         dk_fp = H(dk[:32])
         cls._PoC_dk_to_ek[dk_fp] = ek
+        if len(cls._PoC_dk_to_ek) > _POC_TABLE_MAX:
+            cls._PoC_dk_to_ek.popitem(last=False)
 
         return ek, dk
 
@@ -205,7 +212,8 @@ class MLKEM:
         recover the shared secret from it. Each call produces a FRESH
         (shared_secret, ciphertext) pair — this is the basis for forward secrecy.
         """
-        assert len(ek) == cls.EK_SIZE, f"Invalid ek size: {len(ek)} (expected {cls.EK_SIZE})"
+        if len(ek) != cls.EK_SIZE:
+            raise ValueError(f"Invalid ek size: {len(ek)} (expected {cls.EK_SIZE})")
 
         ephemeral = os.urandom(32)
         shared_secret = H_bytes(ek + ephemeral + b"mlkem-shared-secret")
@@ -215,10 +223,12 @@ class MLKEM:
             ct_material.extend(H_bytes(ek + ephemeral + struct.pack('>I', i) + b"mlkem-ct"))
         ciphertext = bytes(ct_material[:cls.CT_SIZE])
 
-        # PoC: store for decapsulation lookup
+        # PoC: store for decapsulation lookup (LRU-bounded)
         ek_fp = H(ek)
         ct_hash = H(ciphertext)
         cls._PoC_encaps_table[(ek_fp, ct_hash)] = shared_secret
+        if len(cls._PoC_encaps_table) > _POC_TABLE_MAX:
+            cls._PoC_encaps_table.popitem(last=False)
 
         return shared_secret, ciphertext
 
@@ -231,8 +241,10 @@ class MLKEM:
         randomness embedded in the ciphertext via lattice decryption.
         The PoC simulates this via SealedBox._PoC_encaps_table.
         """
-        assert len(dk) == cls.DK_SIZE, f"Invalid dk size: {len(dk)} (expected {cls.DK_SIZE})"
-        assert len(ciphertext) == cls.CT_SIZE, f"Invalid ct size: {len(ciphertext)} (expected {cls.CT_SIZE})"
+        if len(dk) != cls.DK_SIZE:
+            raise ValueError(f"Invalid dk size: {len(dk)} (expected {cls.DK_SIZE})")
+        if len(ciphertext) != cls.CT_SIZE:
+            raise ValueError(f"Invalid ct size: {len(ciphertext)} (expected {cls.CT_SIZE})")
 
         # PoC: recover shared_secret via lookup tables (dk → ek → encaps table)
         dk_fp = H(dk[:32])
@@ -289,10 +301,10 @@ class MLDSA:
     SK_SIZE = 4032   # Signing key (private) size
     SIG_SIZE = 3309  # Signature size
 
-    # PoC: maps sk_fingerprint → vk_fingerprint (populated by keygen)
-    _PoC_sk_to_vk: dict[str, str] = {}
-    # PoC: maps (vk_fingerprint, message_hash) → signature (populated by sign)
-    _PoC_sig_table: dict[tuple[str, str], bytes] = {}
+    # PoC: maps sk_fingerprint → vk_fingerprint (populated by keygen, LRU-bounded)
+    _PoC_sk_to_vk: collections.OrderedDict[str, str] = collections.OrderedDict()
+    # PoC: maps (vk_fingerprint, message_hash) → signature (populated by sign, LRU-bounded)
+    _PoC_sig_table: collections.OrderedDict[tuple[str, str], bytes] = collections.OrderedDict()
 
     @classmethod
     def keygen(cls) -> tuple[bytes, bytes]:
@@ -313,10 +325,12 @@ class MLDSA:
             vk_material.extend(H_bytes(seed + struct.pack('>I', i) + b"mldsa-vk"))
         vk = bytes(vk_material[:cls.VK_SIZE])
 
-        # PoC: store sk→vk binding for signature verification
+        # PoC: store sk→vk binding for signature verification (LRU-bounded)
         sk_fp = H(sk[:32])
         vk_fp = H(vk)
         cls._PoC_sk_to_vk[sk_fp] = vk_fp
+        if len(cls._PoC_sk_to_vk) > _POC_TABLE_MAX:
+            cls._PoC_sk_to_vk.popitem(last=False)
 
         return vk, sk
 
@@ -327,7 +341,8 @@ class MLDSA:
 
         Returns: signature (3309 bytes)
         """
-        assert len(sk) == cls.SK_SIZE, f"Invalid sk size: {len(sk)} (expected {cls.SK_SIZE})"
+        if len(sk) != cls.SK_SIZE:
+            raise ValueError(f"Invalid sk size: {len(sk)} (expected {cls.SK_SIZE})")
 
         raw_sig = H_bytes(sk[:32] + message + b"mldsa-signature")
         sig_material = bytearray()
@@ -335,12 +350,14 @@ class MLDSA:
             sig_material.extend(H_bytes(raw_sig + struct.pack('>I', i) + b"mldsa-expand"))
         signature = bytes(sig_material[:cls.SIG_SIZE])
 
-        # PoC: store for verification lookup
+        # PoC: store for verification lookup (LRU-bounded)
         sk_fp = H(sk[:32])
         vk_fp = cls._PoC_sk_to_vk.get(sk_fp)
         if vk_fp is not None:
             msg_hash = H(message)
             cls._PoC_sig_table[(vk_fp, msg_hash)] = signature
+            if len(cls._PoC_sig_table) > _POC_TABLE_MAX:
+                cls._PoC_sig_table.popitem(last=False)
 
         return signature
 
@@ -351,7 +368,8 @@ class MLDSA:
 
         Returns: True if valid, False if forgery/tamper detected.
         """
-        assert len(vk) == cls.VK_SIZE, f"Invalid vk size: {len(vk)} (expected {cls.VK_SIZE})"
+        if len(vk) != cls.VK_SIZE:
+            raise ValueError(f"Invalid vk size: {len(vk)} (expected {cls.VK_SIZE})")
         if len(signature) != cls.SIG_SIZE:
             return False
         vk_fp = H(vk)

@@ -142,7 +142,7 @@ class TestMLKEM:
             MLKEM.decaps(dk2, ct)
 
     def test_encaps_wrong_ek_size_raises(self):
-        with pytest.raises(AssertionError):
+        with pytest.raises(ValueError, match="Invalid ek size"):
             MLKEM.encaps(b"too short")
 
 

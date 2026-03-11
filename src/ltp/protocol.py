@@ -20,7 +20,7 @@ from typing import Optional
 from .commitment import CommitmentNetwork, CommitmentRecord
 from .entity import Entity
 from .erasure import ErasureCoder
-from .keypair import KeyPair
+from .keypair import KeyPair, KeyRegistry
 from .lattice import LatticeKey
 from .primitives import H, MLKEM, MLDSA
 from .shards import ShardEncryptor
@@ -40,12 +40,16 @@ class LTPProtocol:
       MATERIALIZE: unseal → verify → fetch → decrypt → decode → verify EntityID
     """
 
-    def __init__(self, network: CommitmentNetwork) -> None:
+    def __init__(
+        self,
+        network: CommitmentNetwork,
+        key_registry: Optional[KeyRegistry] = None,
+    ) -> None:
         self.network = network
         self.default_n = 8
         self.default_k = 4
         self._entity_sizes: dict[str, int] = {}
-        self._sender_keypairs: dict[str, KeyPair] = {}
+        self.key_registry = key_registry or KeyRegistry()
 
     # --- PHASE 1: COMMIT ---
 
@@ -72,7 +76,7 @@ class LTPProtocol:
         k = k or self.default_k
 
         sender_id = sender_keypair.label
-        self._sender_keypairs[sender_id] = sender_keypair
+        self.key_registry.register(sender_keypair)
 
         timestamp = time.time()
         entity_id = entity.compute_id(sender_keypair.vk, timestamp)
@@ -238,7 +242,7 @@ class LTPProtocol:
         logger.info("[MATERIALIZE] Commitment reference verified")
 
         # Step 4: Verify ML-DSA-65 signature
-        sender_kp = self._sender_keypairs.get(record.sender_id)
+        sender_kp = self.key_registry.get(record.sender_id)
         if sender_kp is None:
             logger.warning("[MATERIALIZE] Sender '%s' not found in registry", record.sender_id)
             return None

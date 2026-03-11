@@ -33,7 +33,7 @@ Run demo:
 """
 
 from .primitives import H, H_bytes, AEAD, MLKEM, MLDSA
-from .keypair import KeyPair, SealedBox
+from .keypair import KeyPair, KeyRegistry, SealedBox
 from .erasure import ErasureCoder
 from .shards import ShardEncryptor
 from .entity import Entity, canonicalize_shape
@@ -70,6 +70,7 @@ __all__ = [
     "MLDSA",
     # Keypair
     "KeyPair",
+    "KeyRegistry",
     "SealedBox",
     # Erasure coding
     "ErasureCoder",

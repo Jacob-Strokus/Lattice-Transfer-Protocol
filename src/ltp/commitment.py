@@ -358,18 +358,39 @@ class CommitmentNetwork:
     def _placement(
         self, entity_id: str, shard_index: int, replicas: int = 2
     ) -> list[CommitmentNode]:
-        """Deterministic shard placement via consistent hashing."""
+        """Deterministic shard placement via consistent hashing.
+
+        Uses rehashing to avoid the stride-based clustering problem:
+        each replica slot gets a unique hash derived from the placement
+        key and replica index, producing uniform distribution regardless
+        of network size.
+        """
         if not self.nodes:
             raise ValueError("No commitment nodes available")
 
-        placement_key = f"{entity_id}:{shard_index}"
-        h = int.from_bytes(H_bytes(placement_key.encode()), "big")
+        active = [n for n in self.nodes if not n.evicted]
+        if not active:
+            raise ValueError("No active commitment nodes available")
 
-        selected = []
+        n_active = len(active)
+        selected: list[CommitmentNode] = []
+
         for r in range(replicas):
-            idx = (h + r * 7) % len(self.nodes)
-            if self.nodes[idx] not in selected:
-                selected.append(self.nodes[idx])
+            placement_key = f"{entity_id}:{shard_index}:{r}"
+            h = int.from_bytes(H_bytes(placement_key.encode()), "big")
+            idx = h % n_active
+            candidate = active[idx]
+            if candidate not in selected:
+                selected.append(candidate)
+            elif n_active > len(selected):
+                # Rehash to find an unselected node
+                for attempt in range(n_active):
+                    rehash_key = f"{placement_key}:{attempt}"
+                    rh = int.from_bytes(H_bytes(rehash_key.encode()), "big")
+                    candidate = active[rh % n_active]
+                    if candidate not in selected:
+                        selected.append(candidate)
+                        break
 
         return selected
 
@@ -399,10 +420,15 @@ class CommitmentNetwork:
         return H(shard_tree.root())
 
     def fetch_encrypted_shards(
-        self, entity_id: str, n: int, k: int
+        self, entity_id: str, n: int, max_shards: int
     ) -> dict[int, bytes]:
         """
-        Fetch k encrypted shards by deriving locations from entity_id.
+        Fetch up to *max_shards* encrypted shards by deriving locations from entity_id.
+
+        Iterates through shard indices 0..n-1 and stops early once *max_shards*
+        have been collected. Callers typically pass max_shards=n to fetch all
+        available shards, or max_shards=k to fetch the minimum needed for
+        erasure decoding.
 
         NO shard_ids needed — locations computed from entity_id + index.
         Returns: {shard_index: encrypted_shard_bytes}
@@ -410,7 +436,7 @@ class CommitmentNetwork:
         fetched: dict[int, bytes] = {}
 
         for i in range(n):
-            if len(fetched) >= k:
+            if len(fetched) >= max_shards:
                 break
             target_nodes = self._placement(entity_id, i)
             for node in target_nodes:
