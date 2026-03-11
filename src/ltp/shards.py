@@ -80,20 +80,34 @@ class ShardEncryptor:
         digest = H_bytes(cek + entity_id.encode() + index_bytes)
         return digest[:16]
 
+    @staticmethod
+    def _aad(entity_id: str, shard_index: int) -> bytes:
+        """Associated data binding entity_id and shard_index into the AEAD tag.
+
+        This explicitly authenticates shard identity alongside the nonce derivation,
+        providing defense-in-depth: even if the nonce were somehow reused, the AAD
+        prevents cross-entity or cross-index shard substitution.
+        """
+        return entity_id.encode() + struct.pack('>I', shard_index)
+
     @classmethod
     def encrypt_shard(
         cls, cek: bytes, entity_id: str, plaintext_shard: bytes, shard_index: int
     ) -> bytes:
         """Encrypt a shard with CEK. Returns ciphertext || 32-byte auth tag."""
         cls.validate_cek(cek)
-        return AEAD.encrypt(cek, plaintext_shard, cls._nonce(cek, entity_id, shard_index))
+        nonce = cls._nonce(cek, entity_id, shard_index)
+        aad = cls._aad(entity_id, shard_index)
+        return AEAD.encrypt(cek, plaintext_shard, nonce, aad)
 
     @classmethod
     def decrypt_shard(
         cls, cek: bytes, entity_id: str, encrypted_shard: bytes, shard_index: int
     ) -> bytes:
         """Decrypt a shard with CEK. Raises ValueError if tampered."""
-        return AEAD.decrypt(cek, encrypted_shard, cls._nonce(cek, entity_id, shard_index))
+        nonce = cls._nonce(cek, entity_id, shard_index)
+        aad = cls._aad(entity_id, shard_index)
+        return AEAD.decrypt(cek, encrypted_shard, nonce, aad)
 
     @classmethod
     def reset_poc_state(cls) -> None:

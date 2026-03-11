@@ -88,13 +88,14 @@ class AEAD:
         return bytes(stream[:length])
 
     @staticmethod
-    def _compute_tag(key: bytes, ciphertext: bytes, nonce: bytes) -> bytes:
-        """Compute authentication tag: BLAKE2b(tag_key || nonce || ciphertext)."""
+    def _compute_tag(key: bytes, ciphertext: bytes, nonce: bytes, aad: bytes = b"") -> bytes:
+        """Compute authentication tag: BLAKE2b(tag_key || nonce || aad_len || aad || ciphertext)."""
         tag_key = H_bytes(key + b"aead-auth-tag-key")
-        return H_bytes(tag_key + nonce + ciphertext)
+        aad_len = struct.pack('>Q', len(aad))
+        return H_bytes(tag_key + nonce + aad_len + aad + ciphertext)
 
     @classmethod
-    def encrypt(cls, key: bytes, plaintext: bytes, nonce: bytes) -> bytes:
+    def encrypt(cls, key: bytes, plaintext: bytes, nonce: bytes, aad: bytes = b"") -> bytes:
         """
         Encrypt plaintext → ciphertext || 32-byte auth tag.
 
@@ -102,14 +103,15 @@ class AEAD:
             key: 32-byte symmetric key
             plaintext: data to encrypt
             nonce: unique per (key, message) pair
+            aad: associated data authenticated but not encrypted
         """
         keystream = cls._keystream(key, nonce, len(plaintext))
         ciphertext = bytes(a ^ b for a, b in zip(plaintext, keystream))
-        tag = cls._compute_tag(key, ciphertext, nonce)
+        tag = cls._compute_tag(key, ciphertext, nonce, aad)
         return ciphertext + tag
 
     @classmethod
-    def decrypt(cls, key: bytes, ciphertext_with_tag: bytes, nonce: bytes) -> bytes:
+    def decrypt(cls, key: bytes, ciphertext_with_tag: bytes, nonce: bytes, aad: bytes = b"") -> bytes:
         """
         Verify tag, then decrypt → plaintext. Raises ValueError if tampered.
 
@@ -121,7 +123,7 @@ class AEAD:
         ciphertext = ciphertext_with_tag[:-cls.TAG_SIZE]
         tag = ciphertext_with_tag[-cls.TAG_SIZE:]
 
-        expected_tag = cls._compute_tag(key, ciphertext, nonce)
+        expected_tag = cls._compute_tag(key, ciphertext, nonce, aad)
         if not hmac_mod.compare_digest(tag, expected_tag):
             raise ValueError("AEAD authentication FAILED — data has been tampered with")
 

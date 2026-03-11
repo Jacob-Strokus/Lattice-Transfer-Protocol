@@ -138,24 +138,34 @@ class CommitmentRecord:
     signature: bytes = b""    # ML-DSA-65 signature (3309 bytes)
 
     def signable_payload(self) -> bytes:
-        """The canonical bytes that get signed/verified.
+        """Deterministic binary encoding of the fields that get signed/verified.
+
+        Uses struct-packed binary encoding instead of JSON to avoid
+        cross-implementation float serialization differences (e.g.,
+        1234567890.123 vs 1.234567890123e+09).  Each field is
+        length-prefixed (4-byte big-endian) except the fixed-size timestamp
+        (8-byte IEEE 754 double, big-endian).
 
         NOTE: `predecessor` is intentionally excluded. It is set by
         CommitmentLog.append() after signing, so including it would
         invalidate the signature. The sender authenticates the commitment
-        content; the log's hash-chain separately authenticates predecessor.
+        content; the log's Merkle tree separately authenticates ordering.
         """
-        d = {
-            "entity_id": self.entity_id,
-            "sender_id": self.sender_id,
-            "shard_map_root": self.shard_map_root,
-            "content_hash": self.content_hash,
-            "encoding_params": self.encoding_params,
-            "shape": self.shape,
-            "shape_hash": self.shape_hash,
-            "timestamp": self.timestamp,
-        }
-        return json.dumps(d, sort_keys=True).encode()
+        parts: list[bytes] = []
+        for s in (self.entity_id, self.sender_id, self.shard_map_root,
+                  self.content_hash, self.shape, self.shape_hash):
+            raw = s.encode()
+            parts.append(struct.pack('>I', len(raw)) + raw)
+        # Timestamp as fixed-width IEEE 754 double (deterministic across languages)
+        parts.append(struct.pack('>d', self.timestamp))
+        # Encoding params: sorted key-value pairs, each length-prefixed
+        ep = self.encoding_params
+        for k in sorted(ep.keys()):
+            kb = k.encode()
+            vb = str(ep[k]).encode()
+            parts.append(struct.pack('>I', len(kb)) + kb)
+            parts.append(struct.pack('>I', len(vb)) + vb)
+        return b"LTP-COMMIT-v1\x00" + b"".join(parts)
 
     def sign(self, sender_sk: bytes) -> None:
         """Sign this record with the sender's ML-DSA-65 signing key."""
@@ -166,6 +176,21 @@ class CommitmentRecord:
         if not self.signature:
             return False
         return MLDSA.verify(sender_vk, self.signable_payload(), self.signature)
+
+    def to_bytes(self) -> bytes:
+        """Deterministic binary encoding of the full record (including signature).
+
+        Used for Merkle log leaves and commitment_ref computation.  Includes
+        all fields — predecessor and signature — unlike signable_payload()
+        which excludes them.
+        """
+        parts: list[bytes] = [self.signable_payload()]
+        # Predecessor (may be None before log appends it)
+        pred = (self.predecessor or "").encode()
+        parts.append(struct.pack('>I', len(pred)) + pred)
+        # Signature
+        parts.append(struct.pack('>I', len(self.signature)) + self.signature)
+        return b"LTP-RECORD-v1\x00" + b"".join(parts)
 
     def to_dict(self) -> dict:
         return {
@@ -216,15 +241,15 @@ class CommitmentLog:
         """
         Append a record to the Merkle log. Returns its commitment reference.
 
-        The record is serialized to canonical JSON, appended to the MerkleLog,
-        and an STH is published covering the new tree state.
+        The record is serialized to deterministic binary encoding, appended to
+        the MerkleLog, and an STH is published covering the new tree state.
         """
         if record.entity_id in self._records:
             raise ValueError(f"Entity {record.entity_id} already committed (immutable)")
 
         record.predecessor = self.head_hash
 
-        record_bytes = json.dumps(record.to_dict(), sort_keys=True).encode()
+        record_bytes = record.to_bytes()
         record_hash = H(record_bytes)
         idx = self._merkle_log.append(record_bytes)
         self._merkle_log.publish_sth()
@@ -253,7 +278,7 @@ class CommitmentLog:
             return True, -1
         for i, entity_id in enumerate(self._chain):
             record = self._records[entity_id]
-            record_bytes = json.dumps(record.to_dict(), sort_keys=True).encode()
+            record_bytes = record.to_bytes()
             expected = _leaf_hash(record_bytes)
             stored = self._merkle_log._tree.leaf_hash(i)
             if expected != stored:
@@ -278,7 +303,7 @@ class CommitmentLog:
         record = self._records.get(entity_id)
         if record is None:
             return False
-        record_bytes = json.dumps(record.to_dict(), sort_keys=True).encode()
+        record_bytes = record.to_bytes()
         inc_proof = proof["inclusion_proof"]
         return inc_proof.verify(record_bytes, proof["root_hash"])
 
@@ -354,19 +379,24 @@ class CommitmentNetwork:
         """
         Distribute encrypted shards to commitment nodes.
 
-        Returns: Merkle root of encrypted shard hashes (for commitment record).
-        """
-        shard_hashes = []
+        Returns: Merkle root of encrypted shard hashes (RFC 6962 tree).
 
+        The shard Merkle tree uses the same domain-separated hashing as the
+        commitment log (0x00 leaf prefix, 0x01 internal prefix), enabling
+        O(log n) per-shard inclusion proofs against the commitment record.
+        """
+        from ..merkle_log.tree import MerkleTree
+
+        shard_tree = MerkleTree()
         for i, enc_shard in enumerate(encrypted_shards):
-            shard_hash = H(enc_shard + entity_id.encode() + struct.pack('>I', i))
-            shard_hashes.append(shard_hash)
+            shard_data = enc_shard + entity_id.encode() + struct.pack('>I', i)
+            shard_tree.append(shard_data)
 
             target_nodes = self._placement(entity_id, i, replicas)
             for node in target_nodes:
                 node.store_shard(entity_id, i, enc_shard)
 
-        return H(''.join(shard_hashes).encode())
+        return H(shard_tree.root())
 
     def fetch_encrypted_shards(
         self, entity_id: str, n: int, k: int

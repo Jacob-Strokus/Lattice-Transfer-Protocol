@@ -12,7 +12,6 @@ Post-quantum security model (Option C + ML-KEM + ML-DSA):
 
 from __future__ import annotations
 
-import json
 import logging
 import struct
 import time
@@ -160,7 +159,7 @@ class LTPProtocol:
 
         Returns: sealed lattice key (opaque bytes)
         """
-        commitment_ref = H(json.dumps(record.to_dict(), sort_keys=True).encode())
+        commitment_ref = H(record.to_bytes())
 
         key = LatticeKey(
             entity_id=entity_id,
@@ -232,7 +231,7 @@ class LTPProtocol:
         logger.info("[MATERIALIZE] Commitment record found in log")
 
         # Step 3: Verify commitment reference
-        record_ref = H(json.dumps(record.to_dict(), sort_keys=True).encode())
+        record_ref = H(record.to_bytes())
         if record_ref != key.commitment_ref:
             logger.warning("[MATERIALIZE] Commitment reference MISMATCH (tampered?)")
             return None
