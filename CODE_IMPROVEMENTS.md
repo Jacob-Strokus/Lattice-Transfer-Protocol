@@ -211,14 +211,14 @@ The comment at line 253 says "fetch all n shards so AEAD can reject bad ones" bu
 | 1 | Global mutable PoC state | Medium | Low | **DONE** — LRU-bounded `OrderedDict` tables (10K cap) |
 | 2 | `assert` for input validation | High | Low | **DONE** — replaced with `ValueError` in primitives.py, keypair.py |
 | 3 | Sender key registry coupling | Medium | Medium | **DONE** — extracted `KeyRegistry` class, shared across instances |
-| 4 | Demo file too long | Low | Medium | Open |
+| 4 | Demo file too long | Low | Medium | **DONE** — refactored into 10 focused functions |
 | 5 | No `pyproject.toml` | Medium | Low | **DONE** |
 | 6 | `__pycache__` in git | Low | Low | **DONE** |
-| 7 | Erasure coding performance | Low (PoC) | High | Open (PoC limitation) |
+| 7 | Erasure coding performance | Low (PoC) | High | **DONE** — documented in `ErasureCoder` docstring |
 | 8 | Weak shard placement | Medium | Medium | **DONE** — rehash-based consistent hashing, evicted-node aware |
 | 9 | Linear scan in log | Low | Low | **DONE** — `_record_indices` dict for O(1) lookup |
 | 10 | `print()` instead of logging | Medium | Medium | **DONE** — library code uses `logging` module |
-| 11 | Missing type annotations | Low | Low | Open |
+| 11 | Missing type annotations | Low | Low | **DONE** — `Optional[int]`, `Optional[dict]` in protocol.py |
 | 12 | Confusing fetch API | Low | Low | **DONE** — renamed `k` → `max_shards` with docstring |
 
-The codebase is well-structured with excellent test coverage (173 tests, all passing), thorough security property validation, and clear documentation. 9 of 12 recommendations have been implemented; the remaining 3 are low-severity items (#4 demo refactor, #7 erasure performance, #11 type annotations).
+The codebase is well-structured with excellent test coverage (173 tests, all passing), thorough security property validation, and clear documentation. All 12 recommendations have been addressed.

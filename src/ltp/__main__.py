@@ -24,6 +24,7 @@ import logging
 import os
 import struct
 import sys
+from itertools import combinations
 
 from . import (
     AEAD, MLKEM, MLDSA,
@@ -37,49 +38,39 @@ from . import (
 )
 
 
-def demo() -> None:
-    """Run a full LTP transfer demo with post-quantum security."""
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(message)s",
-    )
-
-    print("=" * 74)
-    print("  LATTICE TRANSFER PROTOCOL (LTP) v3")
-    print("  Security: Post-Quantum (ML-KEM-768 + ML-DSA-65 + AEAD)")
-    print("=" * 74)
-    print()
-
-    # --- Keypairs ---
-    print("▸ Generating post-quantum keypairs (ML-KEM-768 + ML-DSA-65)...")
-    alice = KeyPair.generate("alice")
-    bob = KeyPair.generate("bob")
-    eve = KeyPair.generate("eve-attacker")
-    print(f"  Alice (sender):   ek={alice.pub_hex}  (ek:{MLKEM.EK_SIZE}B dk:{MLKEM.DK_SIZE}B)")
-    print(f"  Bob (receiver):   ek={bob.pub_hex}  (vk:{MLDSA.VK_SIZE}B sk:{MLDSA.SK_SIZE}B)")
-    print(f"  Eve (attacker):   ek={eve.pub_hex}")
-    print()
-
-    # --- Commitment network ---
-    print("▸ Setting up commitment network...")
-    network = CommitmentNetwork()
-
-    for node_id, region in [
+def _setup_network() -> tuple[CommitmentNetwork, list[tuple[str, str]]]:
+    """Create and populate a commitment network with 6 regional nodes."""
+    node_defs = [
         ("node-us-east-1", "US-East"),
         ("node-us-west-1", "US-West"),
         ("node-eu-west-1", "EU-West"),
         ("node-eu-east-1", "EU-East"),
         ("node-ap-east-1", "AP-East"),
         ("node-ap-south-1", "AP-South"),
-    ]:
+    ]
+    network = CommitmentNetwork()
+    for node_id, region in node_defs:
         network.add_node(node_id, region)
         print(f"  Added commitment node: {node_id} ({region})")
+    return network, node_defs
 
-    print()
-    protocol = LTPProtocol(network)
 
-    # --- Transfers ---
+# ---------------------------------------------------------------------------
+# Phase demos
+# ---------------------------------------------------------------------------
+
+def demo_transfers(
+    protocol: LTPProtocol,
+    network: CommitmentNetwork,
+    alice: KeyPair,
+    bob: KeyPair,
+    eve: KeyPair,
+) -> list[tuple[str, bytes, str]]:
+    """Run three-phase transfers with security tests."""
     test_cases = [
         ("Small message",
          b"Hello, this is a secure immutable transfer via LTP!",
@@ -147,7 +138,20 @@ def demo() -> None:
             print(f"  [SECURITY] ✓ Node compromise yields ONLY ciphertext")
         print("└─ Security tests done\n")
 
-    # --- Shard Integrity Verification (Theorem 4 — SINT) ---
+    return test_cases
+
+
+# ---------------------------------------------------------------------------
+# Shard integrity (Theorem 4 — SINT)
+# ---------------------------------------------------------------------------
+
+def demo_shard_integrity(
+    protocol: LTPProtocol,
+    network: CommitmentNetwork,
+    alice: KeyPair,
+    bob: KeyPair,
+) -> None:
+    """Test tamper detection via AEAD authentication."""
     print("─" * 74)
     print("▸ SHARD INTEGRITY: Tamper Detection (Theorem 4 — SINT game)")
     print("─" * 74)
@@ -189,7 +193,19 @@ def demo() -> None:
         print(f"  [INTEGRITY] ✗ Materialization failed (not enough valid shards)")
     print("└─ Integrity test complete\n")
 
-    # --- Audit Protocol ---
+
+# ---------------------------------------------------------------------------
+# Audit protocol
+# ---------------------------------------------------------------------------
+
+def demo_audit(
+    protocol: LTPProtocol,
+    network: CommitmentNetwork,
+    alice: KeyPair,
+    bob: KeyPair,
+    test_cases: list[tuple[str, bytes, str]],
+) -> None:
+    """Test commitment network audit and eviction."""
     print("─" * 74)
     print("▸ COMMITMENT NETWORK AUDIT PROTOCOL")
     print("─" * 74)
@@ -272,7 +288,18 @@ def demo() -> None:
             print(f"  [VERIFY] ✗ Transfer failed after eviction")
         print("└─ Verification complete\n")
 
-    # --- Degraded Materialization ---
+
+# ---------------------------------------------------------------------------
+# Degraded materialization
+# ---------------------------------------------------------------------------
+
+def demo_degraded_materialization(
+    protocol: LTPProtocol,
+    network: CommitmentNetwork,
+    alice: KeyPair,
+    bob: KeyPair,
+) -> None:
+    """Test any-k-of-n availability guarantee under shard loss."""
     print("─" * 74)
     print("▸ AVAILABILITY GUARANTEE: Degraded Materialization")
     print("─" * 74)
@@ -360,7 +387,13 @@ def demo() -> None:
         print(f"  [VERIFY] ✗ Unexpected success — should have failed")
     print("└─ Done\n")
 
-    # --- Threshold Secrecy (Theorem 7 — TSEC) ---
+
+# ---------------------------------------------------------------------------
+# Threshold secrecy (Theorem 7 — TSEC)
+# ---------------------------------------------------------------------------
+
+def demo_threshold_secrecy() -> None:
+    """Validate information-theoretic threshold secrecy."""
     print("─" * 74)
     print("▸ THRESHOLD SECRECY: Information-Theoretic (Theorem 7 — TSEC game)")
     print("─" * 74)
@@ -378,20 +411,17 @@ def demo() -> None:
     shards_1 = ErasureCoder.encode(msg_1, tsec_n, tsec_k)
     chunk_size = len(shards_0[0])
 
+    # Validation 1: k shards → unique reconstruction
     print("┌─ TSEC VALIDATION 1: k shards → unique reconstruction")
     k_indices = [1, 3, 5, 7]
     recon_0 = ErasureCoder.decode({i: shards_0[i] for i in k_indices}, tsec_n, tsec_k)
     recon_1 = ErasureCoder.decode({i: shards_1[i] for i in k_indices}, tsec_n, tsec_k)
-    print(
-        f"  Reconstruct m_0: {'✓ EXACT MATCH' if recon_0 == msg_0 else '✗ MISMATCH'}"
-    )
-    print(
-        f"  Reconstruct m_1: {'✓ EXACT MATCH' if recon_1 == msg_1 else '✗ MISMATCH'}"
-    )
+    print(f"  Reconstruct m_0: {'✓ EXACT MATCH' if recon_0 == msg_0 else '✗ MISMATCH'}")
+    print(f"  Reconstruct m_1: {'✓ EXACT MATCH' if recon_1 == msg_1 else '✗ MISMATCH'}")
     print("└─ Done\n")
 
+    # Validation 2: k-1 shards → zero distinguishing advantage
     print("┌─ TSEC VALIDATION 2: k-1 shards → zero distinguishing advantage")
-    from itertools import combinations
     tsec_subsets_tested = 0
     tsec_all_consistent = True
 
@@ -401,13 +431,9 @@ def demo() -> None:
         missing_indices = [i for i in range(tsec_n) if i not in subset]
         test_idx = missing_indices[0]
         for byte_pos in range(chunk_size):
-            observed_from_0 = [shards_0[i][byte_pos] for i in subset]
-            val_at_missing_0 = shards_0[test_idx][byte_pos]
-            val_at_missing_1 = shards_1[test_idx][byte_pos]
             full_indices = subset + [test_idx]
             alphas_0 = [i + 1 for i in full_indices]
             try:
-                ErasureCoder._invert_vandermonde(alphas_0, tsec_k)
                 ErasureCoder._invert_vandermonde(alphas_0, tsec_k)
             except AssertionError:
                 tsec_all_consistent = False
@@ -424,6 +450,7 @@ def demo() -> None:
         print(f"  → ✗ UNEXPECTED: found a distinguishing subset!")
     print("└─ Done\n")
 
+    # Validation 3: Statistical uniformity
     print("┌─ TSEC VALIDATION 3: Statistical uniformity of k-1 shard bytes")
     import random as _tsec_rng
     _tsec_rng.seed(42)
@@ -453,6 +480,7 @@ def demo() -> None:
     print(f"  Chi-squared test: {'PASS (uniform)' if chi2_pass else 'FAIL (non-uniform)'}")
     print("└─ Done\n")
 
+    # Validation 4: CEK compromise + k-1 nodes → zero information
     print("┌─ TSEC VALIDATION 4: CEK compromise + k-1 nodes → zero information")
     tsec_cek = ShardEncryptor.generate_cek()
     tsec_entity_id = H(tsec_cek + b"tsec-validation-4")
@@ -488,6 +516,7 @@ def demo() -> None:
     print(f"  → Adv^TSEC = 0: information-theoretic secrecy holds even after CEK compromise")
     print("└─ Done\n")
 
+    # Validation 5: Sharp threshold boundary (k-1 → k)
     print("┌─ TSEC VALIDATION 5: Sharp threshold boundary (k-1 → k)")
     recon_from_k = ErasureCoder.decode(
         {i: shards_0[i] for i in range(tsec_k)}, tsec_n, tsec_k
@@ -499,7 +528,17 @@ def demo() -> None:
     print(f"  One shard makes the difference between perfect secrecy and full disclosure")
     print("└─ Done\n")
 
-    # --- Entity Immutability (Theorem 3 — IMM) ---
+
+# ---------------------------------------------------------------------------
+# Entity immutability (Theorem 3 — IMM)
+# ---------------------------------------------------------------------------
+
+def demo_entity_immutability(
+    protocol: LTPProtocol,
+    alice: KeyPair,
+    bob: KeyPair,
+) -> None:
+    """Validate entity immutability and collision resistance."""
     print("─" * 74)
     print("▸ ENTITY IMMUTABILITY: Collision Resistance (Theorem 3 — IMM game)")
     print("─" * 74)
@@ -526,9 +565,8 @@ def demo() -> None:
     eid_v1 = entity_v1.compute_id(imm_sender.vk, imm_timestamp)
     entity_v2 = Entity(content=imm_content, shape="text/html")
     eid_v2 = entity_v2.compute_id(imm_sender.vk, imm_timestamp)
-    import sys as _sys
     eid_v3 = imm_entity.compute_id(
-        imm_sender.vk, imm_timestamp + _sys.float_info.epsilon * imm_timestamp
+        imm_sender.vk, imm_timestamp + sys.float_info.epsilon * imm_timestamp
     )
     eid_v4 = imm_entity.compute_id(bob.vk, imm_timestamp)
     all_eids = {eid_original, eid_v1, eid_v2, eid_v3, eid_v4}
@@ -595,7 +633,13 @@ def demo() -> None:
         )
     print("└─ Done\n")
 
-    # --- Commitment Log Trust Model (§5.1.4) ---
+
+# ---------------------------------------------------------------------------
+# Commitment log trust model (§5.1.4)
+# ---------------------------------------------------------------------------
+
+def demo_commitment_log_trust(network: CommitmentNetwork) -> None:
+    """Validate hash-chain integrity, inclusion proofs, tamper detection, STH."""
     print("─" * 74)
     print("▸ COMMITMENT LOG TRUST MODEL (§5.1.4 — Hash-Chain + STH)")
     print("─" * 74)
@@ -654,7 +698,13 @@ def demo() -> None:
     print(f"  ML-DSA-65 STH signatures verified: {'✓' if sth_verified else '✗'} ({min(5, len(sth_list))} checked)")
     print("└─ Done\n")
 
-    # --- Storage Proof Strengthening (§5.2.2) ---
+
+# ---------------------------------------------------------------------------
+# Storage proof strengthening (§5.2.2)
+# ---------------------------------------------------------------------------
+
+def demo_storage_proofs(network: CommitmentNetwork) -> None:
+    """Validate burst-challenge storage proofs."""
     print("─" * 74)
     print("▸ STORAGE PROOF STRENGTHENING (§5.2.2 — Burst Challenges)")
     print("─" * 74)
@@ -707,7 +757,16 @@ def demo() -> None:
         )
         print("└─ Done\n")
 
-    # --- Correlated Failure Model (§5.4.1.1) ---
+
+# ---------------------------------------------------------------------------
+# Correlated failure model (§5.4.1.1)
+# ---------------------------------------------------------------------------
+
+def demo_correlated_failure(
+    network: CommitmentNetwork,
+    entity_id: str,
+) -> None:
+    """Validate cross-region placement and regional failure resilience."""
     print("─" * 74)
     print("▸ CORRELATED FAILURE MODEL (§5.4.1.1 — Regional Failure)")
     print("─" * 74)
@@ -764,7 +823,13 @@ def demo() -> None:
         network.restore_region(regions[1])
         print("└─ Done\n")
 
-    # --- Summary ---
+
+# ---------------------------------------------------------------------------
+# Summary
+# ---------------------------------------------------------------------------
+
+def print_summary(network: CommitmentNetwork) -> None:
+    """Print the final transfer summary."""
     print("=" * 74)
     print("  TRANSFER SUMMARY — Post-Quantum Security (ML-KEM-768 + ML-DSA-65)")
     print("=" * 74)
@@ -808,6 +873,53 @@ def demo() -> None:
     print("  Bandwidth didn't disappear. It redistributed to where it's cheapest.")
     print("  Now quantum-resistant at every layer.")
     print("=" * 74)
+
+
+# ---------------------------------------------------------------------------
+# Main entry point
+# ---------------------------------------------------------------------------
+
+def demo() -> None:
+    """Run a full LTP transfer demo with post-quantum security."""
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+    )
+
+    print("=" * 74)
+    print("  LATTICE TRANSFER PROTOCOL (LTP) v3")
+    print("  Security: Post-Quantum (ML-KEM-768 + ML-DSA-65 + AEAD)")
+    print("=" * 74)
+    print()
+
+    # --- Keypairs ---
+    print("▸ Generating post-quantum keypairs (ML-KEM-768 + ML-DSA-65)...")
+    alice = KeyPair.generate("alice")
+    bob = KeyPair.generate("bob")
+    eve = KeyPair.generate("eve-attacker")
+    print(f"  Alice (sender):   ek={alice.pub_hex}  (ek:{MLKEM.EK_SIZE}B dk:{MLKEM.DK_SIZE}B)")
+    print(f"  Bob (receiver):   ek={bob.pub_hex}  (vk:{MLDSA.VK_SIZE}B sk:{MLDSA.SK_SIZE}B)")
+    print(f"  Eve (attacker):   ek={eve.pub_hex}")
+    print()
+
+    # --- Commitment network ---
+    print("▸ Setting up commitment network...")
+    network, _ = _setup_network()
+    print()
+    protocol = LTPProtocol(network)
+
+    # --- Run demo sections ---
+    test_cases = demo_transfers(protocol, network, alice, bob, eve)
+    demo_shard_integrity(protocol, network, alice, bob)
+    demo_audit(protocol, network, alice, bob, test_cases)
+    demo_degraded_materialization(protocol, network, alice, bob)
+    demo_threshold_secrecy()
+    demo_entity_immutability(protocol, alice, bob)
+    demo_commitment_log_trust(network)
+    demo_storage_proofs(network)
+    demo_correlated_failure(network, entity_id="")
+    print_summary(network)
 
 
 if __name__ == "__main__":

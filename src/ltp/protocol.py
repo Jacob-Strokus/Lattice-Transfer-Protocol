@@ -57,8 +57,8 @@ class LTPProtocol:
         self,
         entity: Entity,
         sender_keypair: KeyPair,
-        n: int = None,
-        k: int = None,
+        n: Optional[int] = None,
+        k: Optional[int] = None,
     ) -> tuple[str, CommitmentRecord, bytes]:
         """
         PHASE 1: COMMIT
@@ -146,7 +146,7 @@ class LTPProtocol:
         record: CommitmentRecord,
         cek: bytes,
         receiver_keypair: KeyPair,
-        access_policy: dict = None,
+        access_policy: Optional[dict] = None,
     ) -> bytes:
         """
         PHASE 2: LATTICE

@@ -30,9 +30,12 @@ class ErasureCoder:
     data split into k chunks, where ANY k of the n shards are sufficient to
     reconstruct the original data. This is the core availability guarantee.
 
-    NOTE: Production would use an optimized Reed-Solomon library (e.g., zfec,
-    liberasurecode) for performance. This implementation prioritizes correctness
-    and clarity over speed.
+    Performance (PoC limitation):
+      Encode/decode are O(n * k * chunk_size) pure-Python loops over GF(256).
+      For a 100 KB payload with n=8, k=4: ~800K GF multiplications per encode.
+      This is acceptable for testing and small payloads but will bottleneck at
+      scale.  Production should swap in an optimized backend (zfec, liberasurecode,
+      or Intel ISA-L) behind the same encode/decode API.
     """
 
     _GF_EXP = [0] * 512
