@@ -618,12 +618,89 @@ spec:
 
 ## Stage 5: Key Management
 
-### 5.1 Initial Key Generation
+### 5.0 Key Protection Strategy
+
+The STH signing key is the trust anchor for the entire commitment log. Key protection
+options were evaluated as of early 2026:
+
+| Solution | ML-DSA-65 Status | Hardware-Protected? | Monthly Cost (HA) |
+|----------|-----------------|--------------------|--------------------|
+| **AWS KMS** | **GA** | Yes (AWS-managed FIPS 140-3 L3 HSMs) | **~$1.26** |
+| AWS CloudHSM | Preview (not GA) | Yes (self-managed) | ~$2,100 |
+| Vault Enterprise | Experimental | No (software) | ~$4,500+ |
+| Thales Luna HSM v7.9 | Production firmware | Yes (self-managed hardware) | Varies |
+
+**Recommended approach (phased):**
+
+1. **Now — AWS KMS ML-DSA-65** (default): GA since mid-2025, FIPS 140-3 Level 3 internally,
+   $1.26/month. Key never leaves AWS HSMs. Trade-off: you trust AWS to operate the hardware.
+   Alternatively, sign in software with liboqs and encrypt the key at rest via KMS envelope
+   encryption (~$1/month + compute).
+
+2. **When CloudHSM ML-DSA goes GA** — Migrate signing into CloudHSM for self-managed hardware
+   isolation. Key never exists outside your HSM. ~$2,100/month for 2-HSM HA cluster.
+
+3. **Vault makes sense only if** you're already running Vault Enterprise for other purposes
+   (database creds, PKI, cloud IAM). It does not provide hardware isolation during signing —
+   keys live in server process memory. Not recommended as a standalone solution for a single
+   signing key.
+
+### 5.1 Option A: AWS KMS ML-DSA-65 (Recommended)
 
 ```bash
 #!/bin/bash
-# scripts/keygen.sh — Run ONCE during initial setup, then store in HSM/Vault
+# scripts/keygen-kms.sh — Create ML-DSA-65 signing key in AWS KMS
+set -euo pipefail
 
+# Create the operator STH signing key (ML-DSA-65, FIPS 140-3 Level 3)
+OPERATOR_KEY_ID=$(aws kms create-key \
+  --key-spec ML_DSA_65 \
+  --key-usage SIGN_VERIFY \
+  --description "ETP operator STH signing key" \
+  --query 'KeyMetadata.KeyId' --output text)
+
+aws kms create-alias \
+  --alias-name alias/etp-operator-sth \
+  --target-key-id "$OPERATOR_KEY_ID"
+
+echo "Operator signing key: $OPERATOR_KEY_ID"
+echo "Sign via: aws kms sign --key-id alias/etp-operator-sth --signing-algorithm ML_DSA_SHAKE_256 ..."
+
+# L2 verifier ML-KEM keypair (generated locally, DK encrypted at rest by KMS)
+python3 -c "
+from ltp.primitives import MLKEM
+ek, dk = MLKEM.keygen()
+open('secrets/l2_verifier_ek.key', 'wb').write(ek)
+open('secrets/l2_verifier_dk.key', 'wb').write(dk)
+print(f'Verifier EK: {len(ek)} bytes')
+print(f'Verifier DK: {len(dk)} bytes — encrypt at rest with KMS envelope encryption')
+"
+```
+
+Kubernetes integration:
+
+```bash
+# Store KMS key ID as a K8s secret (the actual key never leaves KMS)
+kubectl create secret generic etp-operator-kms-key \
+  --namespace=etp \
+  --from-literal=key-id="$OPERATOR_KEY_ID"
+
+# L2 verifier DK — encrypt with KMS, then store in K8s
+aws kms encrypt --key-id alias/etp-data-key \
+  --plaintext fileb://secrets/l2_verifier_dk.key \
+  --output text --query CiphertextBlob | base64 --decode > secrets/l2_verifier_dk.enc
+
+kubectl create secret generic etp-l2-verifier-dk \
+  --namespace=etp --from-file=key=secrets/l2_verifier_dk.enc
+```
+
+### 5.1 Option B: Software Signing + KMS Envelope Encryption
+
+For environments where you want to avoid direct KMS API calls on the signing hot path:
+
+```bash
+#!/bin/bash
+# scripts/keygen-local.sh — Generate locally, protect at rest with KMS
 set -euo pipefail
 
 echo "Generating ETP operator keys..."
@@ -638,7 +715,13 @@ print(f'Operator VK: {len(vk)} bytes')
 print(f'Operator SK: {len(sk)} bytes')
 "
 
-# L2 verifier ML-KEM keypair (for bridge sealed keys)
+# Encrypt SK at rest with KMS
+aws kms encrypt --key-id alias/etp-data-key \
+  --plaintext fileb://secrets/operator_sk.key \
+  --output text --query CiphertextBlob | base64 --decode > secrets/operator_sk.enc
+rm secrets/operator_sk.key  # plaintext removed
+
+# L2 verifier ML-KEM keypair
 python3 -c "
 from ltp.primitives import MLKEM
 ek, dk = MLKEM.keygen()
@@ -648,22 +731,24 @@ print(f'Verifier EK: {len(ek)} bytes')
 print(f'Verifier DK: {len(dk)} bytes')
 "
 
-echo "Keys generated. Move SK/DK to HSM/Vault immediately."
+echo "Keys generated. SK encrypted at rest by KMS. Plaintext only in memory at runtime."
 echo "NEVER commit secrets/ to version control."
 ```
 
-### 5.2 Kubernetes Secrets (from Vault)
+Kubernetes integration:
 
 ```bash
-# Create K8s secrets from HashiCorp Vault
-vault kv get -field=sk secret/etp/operator | \
-  kubectl create secret generic etp-operator-signing-key \
-    --namespace=etp --from-file=key=/dev/stdin
+# Create K8s secrets from KMS-encrypted files
+kubectl create secret generic etp-operator-signing-key \
+  --namespace=etp --from-file=key=secrets/operator_sk.enc
 
-vault kv get -field=dk secret/etp/l2-verifier | \
-  kubectl create secret generic etp-l2-verifier-dk \
-    --namespace=etp --from-file=key=/dev/stdin
+kubectl create secret generic etp-l2-verifier-dk \
+  --namespace=etp --from-file=key=secrets/l2_verifier_dk.key
 ```
+
+The signing service decrypts via KMS at startup, holds the key in memory, and signs
+STHs locally. Harden the service: minimal container, no core dumps, encrypted swap,
+strict IAM, restricted network.
 
 ---
 
@@ -750,8 +835,8 @@ groups:
 - [ ] All 173+ tests pass with production crypto
 - [ ] RocksDB storage backend integrated and tested
 - [ ] gRPC service interfaces defined (protobuf schema finalized)
-- [ ] Operator ML-DSA signing key generated and stored in HSM
-- [ ] L2 verifier ML-KEM keypair generated and DK stored in Vault
+- [ ] Operator ML-DSA signing key created in AWS KMS (or generated locally + KMS envelope encryption)
+- [ ] L2 verifier ML-KEM keypair generated and DK encrypted at rest via KMS
 - [ ] Docker images built and pushed to registry
 - [ ] Kubernetes manifests reviewed and applied to staging
 
@@ -811,10 +896,18 @@ groups:
 | 3x Bridge Services | t3.small | ~$45 |
 | EKS Control Plane | Managed | ~$73 |
 | ALB (Ingress) | Application LB | ~$25 |
-| CloudHSM (operator key) | Single HSM | ~$1,400 |
-| **Total** | | **~$2,133/mo** |
+| AWS KMS (operator key) | ML-DSA-65 key + signing ops | ~$1 |
+| **Total** | | **~$734/mo** |
 
-Without CloudHSM (use Vault on EC2 instead): **~$750/mo**.
+**Key management upgrade path:**
+
+| Tier | Key Protection | Additional Cost | Total |
+|------|---------------|----------------|-------|
+| Default | AWS KMS ML-DSA-65 (GA, FIPS 140-3 L3 managed) | +$1/mo | ~$734/mo |
+| Enhanced | CloudHSM 2-HSM HA (when ML-DSA goes GA) | +$2,100/mo | ~$2,833/mo |
+| Enterprise | Thales Luna HSM (self-managed, ML-DSA production-ready now) | Varies | Varies |
+
+See [Stage 5: Key Management](#stage-5-key-management) for the full comparison and phased approach.
 
 ---
 
