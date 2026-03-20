@@ -345,12 +345,27 @@ with the parameters above. Implementations MUST NOT use a different primitive po
 generator, or matrix construction and claim conformance with this identifier.
 
 **Interoperability test vector.** Encoding a 4-byte entity `[0x01, 0x02, 0x03, 0x04]`
-with $n=4$, $k=2$ under these parameters produces the following shards (in hex):
-- Shard 0 ($\alpha^0 = 1$): `0102`
-- Shard 1 ($\alpha^1 = 2$): `0x03 0x08`  *(GF(2⁸) multiplication: 2×01 XOR 1×02, 2×03 XOR 1×04)*
+with $n=4$, $k=2$ under these parameters produces the following shards (in hex). The entity
+is split into $k=2$ coefficient chunks: $c_0 = [\texttt{0x01}, \texttt{0x02}]$,
+$c_1 = [\texttt{0x03}, \texttt{0x04}]$. For each byte position $b$, the encoding evaluates
+$p_b(x) = c_0[b] \oplus (c_1[b] \otimes_{\text{GF}} x)$ at evaluation points
+$\alpha^i$. All arithmetic is in GF(2⁸) under 0x11d (addition = XOR, multiplication = finite
+field multiply).
+
+- Shard 0 ($\alpha^0 = 1$): `0x02 0x06`  *($p_0(1) = \texttt{0x01} \oplus \texttt{0x03} = \texttt{0x02}$, $p_1(1) = \texttt{0x02} \oplus \texttt{0x04} = \texttt{0x06}$)*
+- Shard 1 ($\alpha^1 = 2$): `0x07 0x0A`  *($p_0(2) = \texttt{0x01} \oplus (2 \otimes_{\text{GF}} \texttt{0x03}) = \texttt{0x01} \oplus \texttt{0x06} = \texttt{0x07}$, $p_1(2) = \texttt{0x02} \oplus (2 \otimes_{\text{GF}} \texttt{0x04}) = \texttt{0x02} \oplus \texttt{0x08} = \texttt{0x0A}$)*
+- Shard 2 ($\alpha^2 = 4$): `0x0D 0x12`  *($p_0(4) = \texttt{0x01} \oplus (4 \otimes_{\text{GF}} \texttt{0x03}) = \texttt{0x01} \oplus \texttt{0x0C} = \texttt{0x0D}$, $p_1(4) = \texttt{0x02} \oplus (4 \otimes_{\text{GF}} \texttt{0x04}) = \texttt{0x02} \oplus \texttt{0x10} = \texttt{0x12}$)*
+- Shard 3 ($\alpha^3 = 8$): `0x19 0x22`  *($p_0(8) = \texttt{0x01} \oplus (8 \otimes_{\text{GF}} \texttt{0x03}) = \texttt{0x01} \oplus \texttt{0x18} = \texttt{0x19}$, $p_1(8) = \texttt{0x02} \oplus (8 \otimes_{\text{GF}} \texttt{0x04}) = \texttt{0x02} \oplus \texttt{0x20} = \texttt{0x22}$)*
 - Any 2 of 4 shards reconstruct the original 4 bytes.
 
-*Implementations SHOULD validate against this test vector before deployment.*
+Note: Because the encoding is **non-systematic**, even shard 0 (at evaluation point
+$\alpha^0 = 1$) computes $c_0[b] \oplus c_1[b]$, which does not equal the raw data chunk
+unless $c_1[b] = 0$. Implementations that produce raw data chunks as the first $k$ shards
+are implementing a *systematic* code, which is not conformant.
+
+*Implementations MUST validate against this test vector before deployment. Verification
+against an independent GF(2⁸) library (e.g., `galois` in Python, `leopard-rs` in Rust)
+is strongly recommended.*
 
 **Security Invariant — Nonce Derivation:**
 
@@ -373,7 +388,9 @@ seed-state cloning (e.g., VM snapshot/restore) or cached CEK reuse across retry 
 
 **CEK reuse across entities is mitigated** by the nonce derivation scheme: two different
 entities with the same CEK but different entity_ids produce different nonces, so their
-(CEK, nonce) pairs never collide. CEKs MUST still be generated fresh per entity from a
+(CEK, nonce) pairs collide with negligible probability, bounded by $q^2 / 2^{97}$ under the
+random oracle model, where $q$ is the number of (entity\_id, shard\_index) pairs encrypted
+under the same CEK. CEKs MUST still be generated fresh per entity from a
 CSPRNG (e.g., `os.urandom`, `/dev/urandom`, `CryptGenRandom`) as a defense-in-depth
 measure. Each commit operation MUST generate a fresh CEK regardless of content or entity_id.
 Implementations SHOULD validate that the CEK is not degenerate (all-zero, all-one).
@@ -658,11 +675,13 @@ Estimates are based on published Groth16 benchmarks for comparable Poseidon circ
 #### 3.2.3 Security Properties
 
 **EntityID privacy (hiding).** Under the zero-knowledge property of Groth16 and the
-preimage resistance of Poseidon, the public log entry `(blind_id, zk_proof)` is
+hiding property of the Poseidon commitment scheme $C(x; r) = \text{Poseidon}(x \| r)$,
+the public log entry `(blind_id, zk_proof)` is
 computationally indistinguishable from `(random, simulated_proof)` to any PPT observer.
 An adversary who knows candidate entities $(e_0, e_1)$ cannot match either against the
-log entry — entity_id is not present, and Poseidon preimage resistance prevents inverting
-blind_id. The EntityID fingerprinting attack from §3.3.3 is neutralized.
+log entry — entity_id is not present, and the hiding property of $C(x; r)$ ensures that
+$C(x; r)$ is computationally indistinguishable from uniform when $r$ is drawn uniformly
+from $\{0,1\}^{256}$. The EntityID fingerprinting attack from §3.3.3 is neutralized.
 
 **Binding (immutability preserved).** By the binding property of the Poseidon commitment
 scheme and the soundness of Groth16, a sender cannot open blind_id to two distinct entity_ids
@@ -765,12 +784,36 @@ $(\text{encode}(e), \text{encode}(e'))$ as a collision for $H$. ∎
 
 **Concrete security.** The theorem holds for any $n$-bit collision-resistant $H$. The
 canonical choice is **BLAKE3-256** ($n = 256$); BLAKE2b-256 is an equally valid alternative
-with identical output length and equivalent security parameters (both provide 128-bit
-classical / 128-bit post-quantum collision resistance). The birthday bound gives
-$\mathsf{Adv}^{\text{CR}}_{H} \leq q^2 / 2^{257}$ where $q$ is the number of hash
-evaluations. At $q = 2^{128}$ (computational limit): $\mathsf{Adv} \approx 2^{-1}$
-(infeasible in practice). Grover's algorithm reduces preimage search to $O(2^{128})$
-quantum queries but does **not** improve the birthday bound for collisions.
+with identical output length and equivalent security parameters. The classical birthday
+bound gives $\mathsf{Adv}^{\text{CR}}_{H} \leq q^2 / 2^{257}$ where $q$ is the number of
+hash evaluations. At $q = 2^{128}$ (computational limit): $\mathsf{Adv} \approx 2^{-1}$
+(infeasible in practice).
+
+**Post-quantum collision resistance.** Grover's algorithm reduces preimage search to
+$O(2^{128})$ quantum queries but targets preimages, not collisions. The
+Brassard–Høyer–Tapp (BHT) quantum collision-finding algorithm [BHT98] achieves query
+complexity $O(N^{1/3})$ for finding collisions in an $N$-element domain; Aaronson and
+Shi [AS04] proved the matching lower bound $\Omega(N^{1/3})$, establishing BHT as
+asymptotically optimal. For a 256-bit hash:
+
+$$O((2^{256})^{1/3}) = O(2^{85.3})$$
+
+The correct post-quantum security characterization:
+
+| Property | Classical Security | Post-Quantum Security |
+|:---------|:-----------------:|:--------------------:|
+| Preimage resistance (BLAKE3-256) | 256 bits | 128 bits (Grover) |
+| Collision resistance (BLAKE3-256) | 128 bits (birthday) | **~85 bits (BHT)** |
+
+The ~85-bit quantum collision resistance remains well above any practical attack threshold
+and does not threaten the protocol's security margins. However, preimage resistance and
+collision resistance have different post-quantum security levels.
+
+> [BHT98] Brassard, G., Høyer, P., Tapp, A. "Quantum Cryptanalysis of Hash and
+> Claw-Free Functions." LATIN 1998.
+>
+> [AS04] Aaronson, S., Shi, Y. "Quantum Lower Bounds for the Collision and the
+> Element Distinctness Problems." J. ACM, 2004.
 
 #### 3.3.2 Shard Integrity (Second-Preimage Resistance)
 
@@ -794,14 +837,21 @@ $$\mathsf{Adv}^{\text{SINT}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{SPR
 where $\mathsf{Adv}^{\text{SPR}}_{H}$ is the second-preimage resistance advantage and
 $\mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}$ is the AEAD authentication advantage.
 
-*Proof.* $\mathcal{A}$ must either: (a) find $s_i'$ that collides in $H$ (breaking SPR), or
-(b) forge an AEAD ciphertext that decrypts to $s_i' \neq s_i$ (breaking AEAD authenticity).
-These are independent events; the advantage is bounded by their sum. ∎
+*Proof.* The adversary's strategy can be decomposed into two attack paths:
+(a) find $s_i'$ that collides in $H$ (targeting SPR), or (b) forge an AEAD ciphertext
+that decrypts to $s_i' \neq s_i$ (targeting AEAD authenticity). Success in the SINT game
+requires simultaneously passing *both* the hash check and the AEAD tag verification;
+however, the adversary may *choose* to exploit whichever of SPR or AEAD AUTH is weaker.
+Since the maximum of the two advantages is bounded by their sum, the advantage of this
+composite strategy is bounded by $\mathsf{Adv}^{\text{SPR}}_{H} + \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}$. ∎
 
 **Note (double protection).** Even without AEAD, content-addressing catches substitution.
 AEAD adds a second layer: the AEAD tag authenticates each shard independently, so a
 compromised commitment node cannot serve a modified shard that passes decryption. Both
-layers must be defeated simultaneously.
+layers must be defeated simultaneously — viable attack paths require breaking multiple
+barriers, making the sum bound conservative (the true advantage is at most
+$\min(\mathsf{Adv}^{\text{SPR}}_{H},\, \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}})$
+for attacks that must pass both checks).
 
 #### 3.3.3 Transfer Confidentiality (IND-CPA)
 
@@ -846,7 +896,7 @@ into two independent attack surfaces:
    AEAD-encrypted shards (i.e., excluding the entity_id fingerprinting path), for any
    PPT adversary $\mathcal{A}$:
 
-$$\mathsf{Adv}^{\text{TCONF,enc}}_{\mathcal{A}}(\lambda) \leq 2 \cdot \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) + \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}(\lambda)$$
+$$\mathsf{Adv}^{\text{TCONF,enc}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) + \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}(\lambda)$$
 
 *Proof sketch (encrypted components only).* We proceed via a sequence of games, treating
 entity_id as a fixed public value and bounding only attacks on the cryptographic components:
@@ -860,7 +910,11 @@ entity_id as a fixed public value and bounding only attacks on the cryptographic
   Now the shard ciphertexts are independent of $b$.
 
 In Game 2, restricted to the encrypted components, the adversary's view is independent of
-$b$, so $\Pr[G_2] = 1/2$. ∎
+$b$, so $\Pr[G_2] = 1/2$. By the triangle inequality:
+
+$$|\Pr[G_0] - 1/2| \leq \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}} + \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}$$
+
+which yields the stated bound. ∎
 
 **Practical security.** For most real-world entities (large files, cryptographic keys,
 rich documents), the entity space has sufficient min-entropy that EntityID fingerprinting
@@ -927,12 +981,16 @@ $$\mathsf{Adv}^{\text{TSEC}}_{\mathcal{A}} = 0 \quad \text{for } t < k$$
 
 *Proof.* The Vandermonde encoding evaluates a degree-$(k-1)$ polynomial $p(x) = \sum_{j=0}^{k-1} c_j x^j$
 over GF(256) at $n$ distinct points. Any $t < k$ evaluations leave $k - t \geq 1$ degrees
-of freedom. For every candidate message $m$, there exists a unique polynomial consistent
-with the observed shards. Therefore:
+of freedom. Formally: for any set $T$ of $t < k$ evaluation points and any observed values
+at those points, exactly $256^{k-t}$ polynomials of degree at most $k - 1$ are consistent
+with those evaluations. Crucially, this count is independent of the underlying message —
+for *every* candidate message $m$, the same number of consistent polynomials exist.
+Since the consistent-polynomial count does not depend on the message, the conditional
+distribution of the message given the observed shards equals the prior distribution:
 
 $$\Pr[M = m_b \mid \text{any } t < k \text{ shards}] = \Pr[M = m_b]$$
 
-This is a **perfect secrecy** (Shannon-sense) result — it holds against adversaries with
+This is **Shannon perfect secrecy** by definition — it holds against adversaries with
 unlimited computational power, including quantum computers. It is the MDS (Maximum Distance
 Separable) property of Reed-Solomon codes. ∎
 
@@ -964,28 +1022,35 @@ Game TIMM:
 
 $$\mathsf{Adv}^{\text{TIMM}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{CR}}_{H}(\lambda) + \mathsf{Adv}^{\text{EUF-CMA}}_{\text{ML-DSA}}(\lambda) + \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}(\lambda) + \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda)$$
 
-*Proof.* The adversary must defeat at least one of four barriers:
+*Proof.* Viable attack paths against the TIMM game require breaking *multiple* barriers
+simultaneously. The principal attack paths are:
 
-1. **Unseal the lattice key** to learn the CEK and entity_id → requires breaking ML-KEM
-   IND-CCA ($\mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}$).
+- **Path A (shard substitution):** Substitute AEAD ciphertexts (breaking AEAD AUTH) **and**
+  find $e'$ with $H(e') = H(e)$ that passes the final integrity check (breaking CR).
 
-2. **Forge the commitment record** to point to a different Merkle root → requires breaking
-   ML-DSA EUF-CMA ($\mathsf{Adv}^{\text{EUF-CMA}}_{\text{ML-DSA}}$).
+- **Path B (commitment forgery):** Forge a commitment record pointing to an attacker-controlled
+  Merkle root (breaking EUF-CMA) **and** modify the sealed key to reference the forged
+  record (breaking ML-KEM IND-CCA).
 
-3. **Substitute shard ciphertexts** that decrypt to different plaintext shards → requires
-   breaking AEAD authenticity ($\mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}$).
+- **Path C (key extraction + content substitution):** Extract the CEK from the sealed key
+  (breaking ML-KEM IND-CCA) **and** substitute entity content that passes the hash check
+  (breaking CR).
 
-4. **Find a different entity $e'$** with $H(e') = H(e)$ that passes the final integrity
-   check → requires breaking collision resistance of $H$
-   ($\mathsf{Adv}^{\text{CR}}_{H}$).
+Each path's success probability is a *product* of two or more barrier advantages, which is
+dominated by the largest single-barrier advantage in the product. Since each path requires
+at least one of the four barrier advantages, the union bound over the individual barrier
+advantages remains valid:
 
-Since the receiver's MATERIALIZE phase verifies all four (unseal → lookup record → verify
-signature → decrypt shards → verify AEAD tags → reconstruct → check $H(e') = \text{EntityID}$),
-the adversary must break at least one. The advantage is bounded by the sum. ∎
+$$\mathsf{Adv}^{\text{TIMM}} \leq \mathsf{Adv}^{\text{CR}}_{H} + \mathsf{Adv}^{\text{EUF-CMA}}_{\text{ML-DSA}} + \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}} + \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}$$
+
+This sum bound is conservative — the multi-barrier composition means the protocol's actual
+security is stronger than any single component. ∎
 
 **This is LTP's strongest security theorem.** It is a composite reduction that chains four
 standard cryptographic assumptions. Under NIST Level 3 security (ML-KEM-768 + ML-DSA-65
-+ BLAKE3-256), each component provides $\geq 128$ bits of post-quantum security.
++ BLAKE3-256), ML-KEM and ML-DSA each provide $\geq 128$ bits of post-quantum security,
+while BLAKE3-256 provides ~85-bit post-quantum collision resistance (BHT bound) and
+128-bit post-quantum preimage resistance (Grover bound).
 
 #### 3.3.7 What Cannot Be Formally Proven
 
@@ -1534,6 +1599,14 @@ $$\forall i : |\{\text{domain}(\text{replica}_j) : j \in \text{replicas}(i)\}| \
 That is, replicas of the same shard index MUST be placed in as many distinct failure
 domains as possible. The PoC demonstrates this via region-aware consistent hashing.
 
+**Caveat: cross-domain independence.** The correlated failure model above addresses
+*intra-domain* correlation (all nodes in a failed domain go down together) but still
+assumes *cross-domain* independence: the failure of domain $D_i$ is independent of domain
+$D_j$. This assumption does not model global cloud provider outages, shared DNS failures,
+coordinated adversarial attacks, or common-mode software failures that affect multiple
+domains simultaneously. Deployments facing such correlated cross-domain risks should
+account for them separately.
+
 **Erasure coding guarantee.** The availability model assumes ANY $k$ shards are sufficient
 for reconstruction — not just the first $k$ "data" shards. The reference implementation
 achieves this via a Vandermonde encoding matrix over GF(256) with Gauss-Jordan decoding.
@@ -1670,40 +1743,49 @@ computationally lightweight and highly parallelizable.
 Let:
 - $D$ = entity size in bytes
 - $n$ = total shards, $k$ = reconstruction threshold
-- $r$ = replication factor per shard
+- $r$ = replication factor per shard (copies of each shard across independent nodes)
+- $\rho = nr/k$ = combined expansion factor (erasure coding expansion $n/k$ times replication $r$)
 - $N$ = number of receivers
 - $L_{SR}$ = latency between sender and receiver
 - $L_{RN}$ = latency between receiver and nearest commitment node
 
 **Bandwidth costs:**
 
+Reed-Solomon $(n, k)$ encoding produces $n$ shards, each of size $\lceil D/k \rceil$ bytes.
+Each shard is replicated $r$ times across the commitment network. The total sender upload
+during the commit phase is therefore $n \cdot (D/k) \cdot r = D \cdot nr/k = D\rho$, not $D \cdot r$.
+The factor of $n/k$ represents the erasure coding expansion that occurs *before* replication.
+
 | Metric | Direct Transfer | LTP |
 |--------|----------------|-----|
 | Sender upload (per transfer) | $D$ | — (already committed) |
-| Sender upload (commit, once) | — | $D \cdot r$ |
+| Sender upload (commit, once) | — | $D \cdot nr/k = D\rho$ |
 | Sender→receiver direct | $D$ | $O(1)$ (~1,300 bytes) |
 | Receiver download | $D$ | $D$ (k shards × $D/k$) |
-| **Total system, 1 receiver** | $D$ | $D \cdot r + D \approx D(r+1)$ |
-| **Total system, N receivers** | $D \cdot N$ | $D \cdot r + D \cdot N$ |
+| **Total system, 1 receiver** | $D$ | $D\rho + D = D(\rho+1)$ |
+| **Total system, N receivers** | $D \cdot N$ | $D\rho + D \cdot N$ |
 | **Amortized per receiver (N large)** | $D$ | $\approx D$ |
 
 **Key formula — total system bandwidth:**
 
-$$B_{LTP}(N) = D \cdot r + D \cdot N$$
+$$B_{LTP}(N) = D\rho + D \cdot N = D \cdot \frac{nr}{k} + D \cdot N$$
 $$B_{direct}(N) = D \cdot N$$
 
-For $N = 1$: $B_{LTP} = D(r+1) > D = B_{direct}$. **LTP is strictly worse for single-transfer bandwidth.**
+For $N = 1$: $B_{LTP} = D(\rho+1) > D = B_{direct}$. **LTP is strictly worse for single-transfer bandwidth.**
 
-For $N > r$: $B_{LTP} \approx D \cdot N \approx B_{direct}$. **LTP amortizes to parity.**
+For $N > \rho$: $B_{LTP} \approx D \cdot N \approx B_{direct}$. **LTP amortizes to parity.**
 
-For large $N$: The commit cost $D \cdot r$ becomes negligible. Each additional receiver costs only
+At the default parameters ($n = 64$, $k = 32$, $r = 3$): $\rho = 64 \cdot 3 / 32 = 6$.
+Break-even occurs at $N > 6$ receivers (not $N > 3$).
+
+For large $N$: The commit cost $D\rho$ becomes negligible. Each additional receiver costs only
 $D$ (local shard fetches) + ~1,300 bytes (sealed key). Sender bandwidth is constant after commit.
 
 **Latency costs:**
 
 $$T_{direct} = L_{SR} + \frac{D}{\text{bandwidth}_{SR}}$$
 
-$$T_{LTP} = \underbrace{\frac{1300}{\text{bandwidth}_{SR}}}_{\text{key (negligible)}} + \underbrace{\frac{D/k}{\alpha \cdot \text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
+$$T_{LTP} = \underbrace{L_{RN} + \frac{1300}{\text{bandwidth}_{SR}}}_{\text{key + lookup (negligible)}} + \underbrace{\frac{D/k}{\alpha \cdot \text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
 
 where $\alpha \in (0, 1]$ is a **parallelism efficiency factor** representing the fraction of
 theoretical parallel bandwidth actually achieved. The ideal case $\alpha = 1$ (full parallelism)
@@ -1747,19 +1829,19 @@ contention), $T_{LTP} \approx T_{direct}$ but with the sender free to go offline
 4. Availability: shards survive sender going offline
 
 **Where LTP loses honestly:**
-1. Single-transfer bandwidth: $r+1$ times worse than direct
-2. Storage: the commitment network stores $D \cdot r$ bytes persistently
+1. Single-transfer bandwidth: $\rho + 1 = nr/k + 1$ times worse than direct (e.g., $7\times$ at $n=64, k=32, r=3$)
+2. Storage: the commitment network stores $D \cdot nr/k$ bytes persistently
 3. Complexity: three-phase protocol vs. one-phase direct send
-4. **Deduplication:** no coalescing across commits — every commit pays the full $D \cdot r$
+4. **Deduplication:** no coalescing across commits — every commit pays the full $D \cdot nr/k$
    storage cost regardless of overlap with prior versions. Storage cost implications for
    high-churn workloads:
 
    | Workload | Storage cost (no dedup) | Mitigation |
    |----------|------------------------|------------|
-   | **Version control** (M commits, ~D bytes each) | $M \cdot D \cdot r$ — full snapshot per commit | Delta-encode *before* committing; commit the delta as the entity, not the full snapshot |
-   | **Incremental backup** (M daily snapshots of D bytes) | $M \cdot D \cdot r$ — even if only fraction $\delta$ of content changes per run | Same: commit the changed blocks as distinct entities; reconstruct by layering at the application layer |
-   | **Collaborative editing** (P editors commit near-identical versions) | $P \cdot D \cdot r$ per round | Merge at the application layer before committing; commit the canonical merged entity only |
-   | **Fan-out** (N receivers, 1 commit) | $D \cdot r$ (once) | Favorable case — this is LTP's primary use case |
+   | **Version control** (M commits, ~D bytes each) | $M \cdot D \cdot nr/k$ — full snapshot per commit | Delta-encode *before* committing; commit the delta as the entity, not the full snapshot |
+   | **Incremental backup** (M daily snapshots of D bytes) | $M \cdot D \cdot nr/k$ — even if only fraction $\delta$ of content changes per run | Same: commit the changed blocks as distinct entities; reconstruct by layering at the application layer |
+   | **Collaborative editing** (P editors commit near-identical versions) | $P \cdot D \cdot nr/k$ per round | Merge at the application layer before committing; commit the canonical merged entity only |
+   | **Fan-out** (N receivers, 1 commit) | $D \cdot nr/k$ (once) | Favorable case — this is LTP's primary use case |
 
    ContentHash (§1.2) provides storage-layer deduplication for *byte-identical* commits at the
    cost of revealing content equality to log observers. For version control and backup workloads
@@ -2139,8 +2221,10 @@ $$T_{\text{direct}} = 20\text{ min} + \frac{1\text{ GB}}{1\text{ Mbps}} \approx 
 Each receiver independently pulls the full payload from Earth. Total Earth upload: $N \times 1\text{ GB}$.
 
 **LTP (with Mars-local commitment nodes):**
-- *Commit phase (once, asynchronous):* Sender distributes shards to Mars nodes. At 1 Mbps
-  and $r = 3$: $3\text{ GB} / 1\text{ Mbps} \approx 6.7\text{ hours}$ of Earth upload,
+- *Commit phase (once, asynchronous):* Sender distributes shards to Mars nodes. With
+  $n = 64$, $k = 32$, $r = 3$: total upload $= D \cdot nr/k = 1\text{ GB} \times 6 = 6\text{ GB}$.
+  At 1 Mbps: $6\text{ GB} / 1\text{ Mbps} \approx 13.4\text{ hours}$ of Earth upload,
+  paid once regardless of $N$.
   paid once regardless of $N$.
 - *Lattice phase (per receiver):* ~1,300-byte sealed key transmitted in $< 1\text{ s}$ +
   20-minute light delay.
@@ -2159,10 +2243,10 @@ $$T_{\text{LTP per receiver}} \approx 20\text{ min (light delay)} + 8\text{ sec 
    direct transfer). LTP relocates the bandwidth-intensive step from a high-latency
    intercontinental link to a low-latency local one.
 
-**Break-even on bandwidth:** LTP uses $D(r + N)$ total system bytes versus direct's $DN$.
-LTP's extra commit cost is $D \times r$. At $r = 3$: break-even is $N > r = 3$ receivers —
-beyond 3 Mars-side receivers, LTP's total Earth upload ($3\text{ GB}$ once) is less than
-direct's ($N \times 1\text{ GB}$). At $N = 10$: LTP saves $7\text{ GB}$ of Earth upload.
+**Break-even on bandwidth:** LTP uses $D(\rho + N) = D(nr/k + N)$ total system bytes versus direct's $DN$.
+LTP's extra commit cost is $D \cdot nr/k$. At $n = 64$, $k = 32$, $r = 3$ ($\rho = 6$): break-even is
+$N > \rho = 6$ receivers — beyond 6 Mars-side receivers, LTP's total Earth upload ($6\text{ GB}$ once)
+is less than direct's ($N \times 1\text{ GB}$). At $N = 10$: LTP saves $4\text{ GB}$ of Earth upload.
 
 **What this does NOT claim.** LTP does not solve the physics of light delay — initial shard
 replication to Mars still traverses the 20-minute link. The advantage requires pre-populated
