@@ -212,4 +212,11 @@ See docs/ARCHITECTURE.md for system diagrams and component breakdown.
 
 ## License
 
-This protocol specification is released for open exploration and research.
+This project uses a split license to distinguish the specification from the implementation.
+
+| Artifact | License | What it means |
+|----------|---------|---------------|
+| Reference implementation (`src/`) | [Elastic License 2.0](LICENSE) | Use freely; cannot be offered as a managed/hosted service |
+| Specification & documentation (`docs/`) | [CC BY-ND 4.0](LICENSE-SPEC) | Share freely; no modifications or derivative specs without permission |
+
+Copyright (c) 2026 Jas Strokus
