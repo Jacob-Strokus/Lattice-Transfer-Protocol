@@ -741,6 +741,12 @@ $\mathcal{A}$ denotes a PPT (probabilistic polynomial time) adversary, $\mathsf{
 denotes a negligible function in security parameter $\lambda$, and $\mathsf{Adv}^{X}_{\mathcal{A}}$
 denotes $\mathcal{A}$'s advantage in game $X$.
 
+**Note on theorem numbering.** The theorems in this section are numbered 3–8. Theorems 1
+and 2 are reserved for the informal Corollary (Immutability) and Remark (Availability
+Boundary) in §4.3, which are prose restatements of results proved here rather than
+independent formal results. The numbering is kept consistent so that cross-references
+in §4 align with the formal proofs in §3.3.
+
 **Trust Model Assumption (applies to all theorems in this section).** All theorems below
 assume an honest append-only commitment log: once a commitment record is accepted at position
 $i$, no party can modify it or insert a different record at position $i$, and all honest
@@ -837,21 +843,9 @@ $$\mathsf{Adv}^{\text{SINT}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{SPR
 where $\mathsf{Adv}^{\text{SPR}}_{H}$ is the second-preimage resistance advantage and
 $\mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}$ is the AEAD authentication advantage.
 
-*Proof.* The adversary's strategy can be decomposed into two attack paths:
-(a) find $s_i'$ that collides in $H$ (targeting SPR), or (b) forge an AEAD ciphertext
-that decrypts to $s_i' \neq s_i$ (targeting AEAD authenticity). Success in the SINT game
-requires simultaneously passing *both* the hash check and the AEAD tag verification;
-however, the adversary may *choose* to exploit whichever of SPR or AEAD AUTH is weaker.
-Since the maximum of the two advantages is bounded by their sum, the advantage of this
-composite strategy is bounded by $\mathsf{Adv}^{\text{SPR}}_{H} + \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}$. ∎
+*Proof.* Winning the SINT game requires the adversary to pass **both** checks simultaneously: the submitted $s_i'$ must produce a hash collision ($H(s_i' \| \text{entity\_id} \| i) = H(s_i \| \text{entity\_id} \| i)$, targeting SPR of $H$) **and** the corresponding AEAD ciphertext must carry a valid authentication tag (targeting AEAD authenticity). Let $E_1$ be the event that the adversary breaks SPR and $E_2$ be the event that it forges a valid AEAD tag. Since both conditions are required simultaneously, $\Pr[\text{win}] = \Pr[E_1 \cap E_2] \leq \min(\Pr[E_1], \Pr[E_2]) \leq \mathsf{Adv}^{\text{SPR}}_{H} + \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}$. The sum bound is conservative but valid ($\min(a,b) \leq a + b$ for non-negative $a, b$); the actual advantage is more tightly bounded by $\min(\mathsf{Adv}^{\text{SPR}}_{H},\, \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}})$. ∎
 
-**Note (double protection).** Even without AEAD, content-addressing catches substitution.
-AEAD adds a second layer: the AEAD tag authenticates each shard independently, so a
-compromised commitment node cannot serve a modified shard that passes decryption. Both
-layers must be defeated simultaneously — viable attack paths require breaking multiple
-barriers, making the sum bound conservative (the true advantage is at most
-$\min(\mathsf{Adv}^{\text{SPR}}_{H},\, \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}})$
-for attacks that must pass both checks).
+**Note (double protection).** Content-addressing and AEAD authentication form two independent barriers. An adversary who breaks only one check does not win the SINT game — both must be defeated simultaneously. This makes the protocol resilient against adversaries who can break either primitive in isolation.
 
 #### 3.3.3 Transfer Confidentiality (IND-CPA)
 
@@ -968,36 +962,49 @@ $\mathsf{Game}_{\mathcal{A}}^{\text{TSEC}}$ proceeds as follows:
 
 ```
 Game TSEC:
-  1. Adversary A chooses two messages (m_0, m_1) of equal length.
-  2. Challenger flips coin b ∈ {0, 1}, erasure-encodes m_b into n shards.
-  3. A receives any t < k shards of her choice (adaptive or non-adaptive).
-  4. A outputs guess b'.
-  5. A wins if b' = b.
+  1. Challenger picks a uniformly random entity e from the entity space.
+  2. Challenger erasure-encodes e into n shards {s_0, ..., s_{n-1}}.
+  3. Adversary A (computationally unbounded) receives any t < k shards of
+     her choice (adaptive or non-adaptive). A has no prior knowledge of e.
+  4. A outputs any function of the observed shards.
+  5. A wins if her output reveals any information about e beyond the prior
+     distribution (i.e., if the posterior distribution of e differs from
+     the prior).
 ```
 
-**Theorem 7 (Threshold Secrecy).** For any adversary $\mathcal{A}$ (computationally unbounded):
+**Theorem 7 (Threshold Secrecy — MDS Secrecy).** For any adversary $\mathcal{A}$ (computationally unbounded, including quantum), observing any $t < k$ shards of a uniformly random entity $e$:
 
-$$\mathsf{Adv}^{\text{TSEC}}_{\mathcal{A}} = 0 \quad \text{for } t < k$$
+$$\Pr[M = e \mid \text{any } t < k \text{ shards}] = \Pr[M = e]$$
+
+The conditional distribution of $e$ given any $t < k$ observed shards is identical to its prior distribution. Equivalently, $\mathsf{Adv}^{\text{TSEC}}_{\mathcal{A}} = 0$.
 
 *Proof.* The Vandermonde encoding evaluates a degree-$(k-1)$ polynomial $p(x) = \sum_{j=0}^{k-1} c_j x^j$
 over GF(256) at $n$ distinct points. Any $t < k$ evaluations leave $k - t \geq 1$ degrees
 of freedom. Formally: for any set $T$ of $t < k$ evaluation points and any observed values
 at those points, exactly $256^{k-t}$ polynomials of degree at most $k - 1$ are consistent
-with those evaluations. Crucially, this count is independent of the underlying message —
-for *every* candidate message $m$, the same number of consistent polynomials exist.
-Since the consistent-polynomial count does not depend on the message, the conditional
-distribution of the message given the observed shards equals the prior distribution:
+with those evaluations. Since the entity $e$ is the coefficient vector $(c_0, \ldots, c_{k-1})$
+drawn uniformly at random, and the number of consistent polynomials is the same regardless of
+the true $e$, every candidate entity is equally consistent with the observed shards. The
+posterior distribution of $e$ is therefore identical to the prior, giving $\mathsf{Adv}^{\text{TSEC}}_{\mathcal{A}} = 0$.
+This is the **MDS (Maximum Distance Separable) secrecy property** of Reed-Solomon codes —
+it holds against adversaries with unlimited computational power, including quantum computers. ∎
 
-$$\Pr[M = m_b \mid \text{any } t < k \text{ shards}] = \Pr[M = m_b]$$
+**Note on chosen-message distinguishing.** The TSEC game is stated for an adversary without
+prior knowledge of $e$ — the case that arises in practice when an attacker compromises fewer
+than $k$ commitment nodes but does not know what was committed. An adversary who already knows
+the set of candidate entities can distinguish trivially: since the Vandermonde encoding is
+deterministic, computing the expected shard for each candidate and comparing against the
+observed shard identifies the encoding with certainty. This is not a weakness of the
+construction — it is intentional. The protocol relies on **AEAD encryption (Layer 4)** as the
+primary confidentiality guarantee against adversaries who may know or guess candidate entities.
+The MDS threshold secrecy property provides a second line of defense for the specific case
+where an adversary has obtained the CEK but controls fewer than $k$ commitment nodes.
 
-This is **Shannon perfect secrecy** by definition — it holds against adversaries with
-unlimited computational power, including quantum computers. It is the MDS (Maximum Distance
-Separable) property of Reed-Solomon codes. ∎
-
-**In LTP's context:** Even if an adversary compromises $k - 1$ commitment nodes and decrypts 
-the AEAD ciphertexts (by also obtaining the CEK), the $k - 1$ plaintext shards reveal zero 
-information about the entity. Information-theoretic secrecy provides a second line of defense
-behind AEAD encryption.
+**In LTP's context:** Even if an adversary compromises $k - 1$ commitment nodes and decrypts
+the AEAD ciphertexts (by also obtaining the CEK) without prior knowledge of the entity,
+the $k - 1$ plaintext shards reveal zero information about the entity. This information-theoretic
+guarantee is unconditional — it holds against quantum computers — and provides defense in
+depth behind AEAD encryption.
 
 #### 3.3.6 Transfer Immutability (Composite Game)
 
@@ -1748,6 +1755,7 @@ Let:
 - $N$ = number of receivers
 - $L_{SR}$ = latency between sender and receiver
 - $L_{RN}$ = latency between receiver and nearest commitment node
+- $L_{\log}$ = latency for commitment record lookup from the append-only log (step 2 of MATERIALIZE)
 
 **Bandwidth costs:**
 
@@ -1785,7 +1793,7 @@ $D$ (local shard fetches) + ~1,300 bytes (sealed key). Sender bandwidth is const
 
 $$T_{direct} = L_{SR} + \frac{D}{\text{bandwidth}_{SR}}$$
 
-$$T_{LTP} = \underbrace{L_{RN} + \frac{1300}{\text{bandwidth}_{SR}}}_{\text{key + lookup (negligible)}} + \underbrace{\frac{D/k}{\alpha \cdot \text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
+$$T_{LTP} = \underbrace{L_{RN} + \frac{1300}{\text{bandwidth}_{SR}} + L_{\log}}_{\text{key + record lookup (negligible)}} + \underbrace{\frac{D/k}{\alpha \cdot \text{bandwidth}_{RN}}}_{\text{k parallel shard fetches}}$$
 
 where $\alpha \in (0, 1]$ is a **parallelism efficiency factor** representing the fraction of
 theoretical parallel bandwidth actually achieved. The ideal case $\alpha = 1$ (full parallelism)
@@ -1808,7 +1816,7 @@ In practice $\alpha < 1$ due to:
 |----------|----------|---------------------------|
 | Dedicated bandwidth, no contention | $\approx 1.0$ | Ideal |
 | Shared nodes, moderate load | $\approx 0.5$–$0.8$ | $1.25$–$2\times$ slower |
-| Receiver bandwidth-limited | $\approx D / (k \cdot \text{bandwidth}_{receiver})$ | Bottlenecked by receiver |
+| Receiver bandwidth-limited | $\approx \text{bandwidth}_{receiver} / (k \cdot \text{bandwidth}_{RN})$ | Bottlenecked by receiver |
 | High-contention shared nodes | $\approx 0.2$–$0.4$ | $2.5$–$5\times$ slower |
 
 The latency advantage claimed by LTP holds when $\alpha \cdot \text{bandwidth}_{RN} \gg \text{bandwidth}_{SR}$.
