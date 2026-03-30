@@ -124,6 +124,11 @@ ML-DSA-65 · BLAKE3 · Certificate Transparency · Reed-Solomon coding
     - [6.2 Geographic Distance](#62-geographic-distance)
     - [6.3 Computing Power](#63-computing-power)
     - [6.4 Formal Cost Model](#64-formal-cost-model)
+    - [6.5 Empirical Benchmarks](#65-empirical-benchmarks)
+        - [6.5.1 Primitive Component Benchmarks](#651-primitive-component-benchmarks)
+        - [6.5.2 Cryptographic Key and Signature Sizes](#652-cryptographic-key-and-signature-sizes)
+        - [6.5.3 Lattice Key Sizes and Seal / Unseal Performance](#653-lattice-key-sizes-and-seal--unseal-performance)
+        - [6.5.4 End-to-End Phase Timings](#654-end-to-end-phase-timings)
 - [7. Comparison with Existing Approaches](#7-comparison-with-existing-approaches)
 - [8. Related Work and Prior Art](#8-related-work-and-prior-art)
     - [8.1 Content-Addressed Storage](#81-content-addressed-storage)
@@ -1868,6 +1873,134 @@ contention), $T_{LTP} \approx T_{direct}$ but with the sender free to go offline
    the practical recommendation is to apply delta encoding or content deduplication *before*
    the COMMIT phase — each LTP entity should represent a distinct logical unit, not an
    intermediate edit state.
+
+### 6.5 Empirical Benchmarks
+
+All measurements are produced by `benchmarks/ltp-bench/` using real FIPS 203/204 implementations — no simulations or stand-ins. The full results are archived in `benchmarks/ltp-bench/benchmark_results.md`.
+
+**Test environment:**
+
+| Field | Value |
+|:------|:------|
+| OS | Windows 10 Pro 10.0.19045 |
+| CPU | Intel Core i7-8700 (x86\_64), 8 logical cores |
+| Rustc | 1.94.1, release profile (opt-level=3, LTO, codegen-units=1) |
+| blake3 | v1.x |
+| chacha20poly1305 | v0.10 |
+| reed-solomon-erasure | v6 (GF(256)) |
+| ml-kem | v0.3.0-rc.1 (FIPS 203 ML-KEM-768) |
+| fips204 | v0.4 (FIPS 204 ML-DSA-65) |
+| Erasure parameters | RS(n=8, k=4) |
+| Commitment network | In-process, no network I/O |
+
+**Methodology.** All reported statistics are **median (p50) / p95 / sample stddev**. Five warmup iterations are discarded before measurement begins. Fast operations use 200 iterations; medium 50; slow 10. All data-dependent benchmarks use fresh random input per iteration.
+
+#### 6.5.1 Primitive Component Benchmarks
+
+**BLAKE3-256 hash throughput:**
+
+| Input | Median | p95 | Stddev | Throughput |
+|:-----:|:------:|:---:|:------:|:----------:|
+| 1 KB | 0.001 ms | 0.001 ms | 0.000 ms | 1,220.7 MB/s |
+| 64 KB | 0.013 ms | 0.013 ms | 0.000 ms | 4,845.0 MB/s |
+| 1 MB | 0.212 ms | 0.269 ms | 0.017 ms | 4,725.9 MB/s |
+| 10 MB | 2.202 ms | 2.663 ms | 0.211 ms | 4,541.4 MB/s |
+
+**ChaCha20-Poly1305 AEAD encrypt / decrypt:**
+
+| Input | Op | Median | Stddev | Throughput |
+|:-----:|:--:|:------:|:------:|:----------:|
+| 1 KB | enc | 0.002 ms | 0.000 ms | 574.4 MB/s |
+| 1 KB | dec | 0.002 ms | 0.000 ms | 542.5 MB/s |
+| 64 KB | enc | 0.035 ms | 0.002 ms | 1,785.7 MB/s |
+| 64 KB | dec | 0.035 ms | 0.002 ms | 1,780.6 MB/s |
+| 1 MB | enc | 0.711 ms | 0.011 ms | 1,405.9 MB/s |
+| 1 MB | dec | 0.683 ms | 0.039 ms | 1,463.3 MB/s |
+
+**Reed-Solomon erasure coding RS(n=8, k=4) over GF(256):**
+
+| Entity size | Shards | Op | Median | Stddev | Throughput |
+|:-----------:|:------:|:--:|:------:|:------:|:----------:|
+| 1 KB | 8 × 256 B | enc | 0.002 ms | 0.000 ms | 406.9 MB/s |
+| 1 KB | 8 × 256 B | dec | 0.002 ms | 0.000 ms | 488.3 MB/s |
+| 64 KB | 8 × 16,384 B | enc | 0.117 ms | 0.001 ms | 534.0 MB/s |
+| 64 KB | 8 × 16,384 B | dec | 0.114 ms | 0.001 ms | 548.5 MB/s |
+| 1 MB | 8 × 262,144 B | enc | 1.625 ms | 0.012 ms | 615.2 MB/s |
+| 1 MB | 8 × 262,144 B | dec | 1.790 ms | 0.071 ms | 558.7 MB/s |
+
+**ML-KEM-768 (FIPS 203):**
+
+| Operation | Median | p95 | Stddev |
+|:----------|:------:|:---:|:------:|
+| KeyGen | 0.044 ms | 0.046 ms | 0.0007 ms |
+| Encapsulate | 0.042 ms | 0.042 ms | 0.0010 ms |
+| Decapsulate | 0.054 ms | 0.057 ms | 0.0016 ms |
+
+**ML-DSA-65 (FIPS 204):**
+
+| Operation | Median | p95 | Stddev |
+|:----------|:------:|:---:|:------:|
+| KeyGen | 0.194 ms | 0.200 ms | 0.0091 ms |
+| Sign | 0.387 ms | 1.211 ms | 0.3155 ms |
+| Verify | 0.131 ms | 0.133 ms | 0.0019 ms |
+
+The wide p95 on ML-DSA-65 Sign (1.211 ms vs 0.387 ms median) reflects the rejection-sampling step in Dilithium: most iterations sign in one pass, but occasional restarts inflate the tail. This is a known property of the standard.
+
+#### 6.5.2 Cryptographic Key and Signature Sizes
+
+Canonical FIPS 203 / FIPS 204 sizes, fixed by the standard and verified by the benchmark suite:
+
+| Artifact | Size |
+|:---------|:----:|
+| ML-KEM-768 encapsulation key (ek) | 1,184 bytes |
+| ML-KEM-768 decapsulation key (dk) | 2,400 bytes |
+| ML-KEM-768 ciphertext (ct) | 1,088 bytes |
+| ML-KEM-768 shared secret | 32 bytes |
+| ML-DSA-65 verification key (vk) | 1,952 bytes |
+| ML-DSA-65 signing key (sk) | 4,032 bytes |
+| ML-DSA-65 signature | 3,309 bytes |
+
+#### 6.5.3 Lattice Key Sizes and Seal / Unseal Performance
+
+The sealed lattice key is composed of the ML-KEM-768 ciphertext, a ChaCha20-Poly1305 nonce, the AEAD-encrypted inner payload, and a 16-byte authentication tag. Inner payload size varies with the `access_policy` field:
+
+| Inner payload | KEM ct | Nonce | Tag | **Sealed key total** |
+|:-------------:|:------:|:-----:|:---:|:--------------------:|
+| 171 B (benchmark representative) | 1,088 B | 12 B | 16 B | **1,287 bytes** |
+| ~293 B (unrestricted policy) | 1,088 B | 12 B | 16 B | **~1,409 bytes** |
+| ~330 B (time-bounded + one-time) | 1,088 B | 12 B | 16 B | **~1,446 bytes** |
+
+The O(1) constant-size property holds in all cases: the sealed key size is independent of entity size.
+
+**Seal and Unseal latencies** (ML-KEM-768 encaps/decaps + ChaCha20-Poly1305, 200 iterations):
+
+| Operation | Median | p95 | Stddev |
+|:----------|:------:|:---:|:------:|
+| Seal (ML-KEM encaps + AEAD encrypt) | 0.044 ms | 0.044 ms | 0.0003 ms |
+| Unseal (ML-KEM decaps + AEAD decrypt) | 0.056 ms | 0.057 ms | 0.0004 ms |
+
+#### 6.5.4 End-to-End Phase Timings
+
+In-process execution, n=8 k=4, fresh random entity content per iteration.
+
+| Entity size | COMMIT | LATTICE | MATERIALIZE | Sealed key |
+|:-----------:|:------:|:-------:|:-----------:|:----------:|
+| 1 KB | 0.3 ms | **0.1 ms** | 0.1 ms | 1,299 B |
+| 10 KB | 0.3 ms | **0.1 ms** | 0.1 ms | 1,299 B |
+| 100 KB | 1.6 ms | **0.1 ms** | 0.3 ms | 1,299 B |
+| 1 MB | 6.1 ms | **0.1 ms** | 2.4 ms | 1,299 B |
+
+Phase definitions:
+- **COMMIT** = BLAKE3 hash + RS encode + AEAD encrypt ×8 shards + ML-DSA-65 sign
+- **LATTICE** = ML-KEM-768 encaps + AEAD encrypt(inner payload) — O(1) in entity size
+- **MATERIALIZE** = ML-KEM-768 decaps + AEAD decrypt ×k shards + BLAKE3 verify
+
+**Key observations:**
+
+1. **LATTICE is O(1) and constant at 0.1 ms** across all entity sizes, empirically confirming the theoretical O(1) sender→receiver path.
+2. **COMMIT and MATERIALIZE scale linearly with entity size,** dominated by RS encoding/decoding — consistent with O(entity) RS complexity.
+3. **The phase ratio holds.** LATTICE/(COMMIT+MATERIALIZE) → 0 as entity size grows. At 1 MB, the sender→receiver path is 0.1 ms out of 8.6 ms total — 1.2% of protocol work.
+4. **End-to-end correctness verified.** `H(entity) == entity_id` passes on every iteration across all cryptographic layers.
 
 ---
 
