@@ -119,6 +119,11 @@ ML-DSA-65 · BLAKE3 · Certificate Transparency · Reed-Solomon coding
         - [5.4.3 The CAP Theorem and LTP](#543-the-cap-theorem-and-ltp)
         - [5.4.4 Availability vs. Permanence](#544-availability-vs-permanence)
     - [5.5 Network Economics (Interface, Not Implementation)](#55-network-economics-interface-not-implementation)
+        - [5.5.1 Storage Cost Decomposition](#551-storage-cost-decomposition)
+        - [5.5.2 Incentive Alignment](#552-incentive-alignment)
+        - [5.5.3 Audit Mechanism](#553-audit-mechanism)
+        - [5.5.4 Multi-Receiver Amortization](#554-multi-receiver-amortization)
+        - [5.5.5 TTL and Renewal](#555-ttl-and-renewal)
 - [6. Breaking the Constraints](#6-breaking-the-constraints)
     - [6.1 Latency](#61-latency)
     - [6.2 Geographic Distance](#62-geographic-distance)
@@ -1719,6 +1724,109 @@ Interface: AdmissionControl
 Specifying a token would limit LTP to public deployments. Specifying organizational obligation
 would limit it to enterprises. The interface layer allows any of these.
 
+#### 5.5.1 Storage Cost Decomposition
+
+Each commitment node stores a subset of shards. For an entity of size $D$, with erasure
+parameters $(n, k)$ and replication factor $r$ (independent node copies per shard):
+
+```
+shard_size          = D / k                  (each shard holds 1/k of the original data)
+shards_per_node     ≈ n · r / N_nodes        (evenly distributed via consistent hashing)
+total_network_cost  = D · (n/k) · r          (full expansion; see §6.4)
+```
+
+A node's local storage obligation is therefore proportional to $D/k$, not $D$ — nodes never
+hold enough data to reconstruct the entity without the CEK, and fewer than $k$ nodes cannot
+reconstruct even if colluding (Layer 1 guarantee; see §3.2.1).
+
+The `price()` call in `CommitmentPricing` MUST account for all three factors: entity size
+(determines shard size), replication factor (determines redundancy cost), and TTL (determines
+duration of the obligation).
+
+#### 5.5.2 Incentive Alignment
+
+Three rational-node failure modes must be addressed by any implementation of `NodeIncentive`:
+
+| Failure mode | Description | Interface response |
+|-------------|-------------|-------------------|
+| **Lazy storage** | Node accepts payment but silently evicts shards early | `slash` on failed audit; see §5.5.3 |
+| **Silent serving** | Node stores but refuses to serve retrieval requests | `compensate` includes `bytes_served` — no serving, no reward |
+| **Free-riding** | Node joins to observe traffic without storing anything | `AdmissionControl.apply` requires `storage_proof` and `bond` before admission |
+
+The `compensate` signature deliberately separates storage (`bytes_stored × seconds_stored`) from
+serving (`bytes_served`). An implementation that pays only for storage creates lazy-serving
+nodes; one that pays only for serving creates nodes that accept data but evict immediately.
+Both components are required.
+
+#### 5.5.3 Audit Mechanism
+
+The `slash` interface presupposes an audit subsystem. LTP does not mandate a specific proof
+scheme, but the audit challenge MUST be:
+
+- **Unpredictable** — the node cannot pre-compute responses without storing the actual shard
+- **Lightweight** — auditing should not require retrieving the full shard
+- **Cryptographically binding** — a correct response is infeasible without the ciphertext
+
+A standard approach is a **spot-challenge proof of retrievability (PoR)**:
+
+```
+Audit challenge:
+  1. Coordinator selects random shard_index and random byte offset range [lo, hi]
+  2. Node responds with: BLAKE3(shard_ciphertext[lo:hi] || challenge_nonce)
+  3. Coordinator verifies against stored Merkle leaf for that shard
+
+Failure condition: no response within timeout OR incorrect hash
+Consequence: audit_failure_count incremented → slash() at threshold
+```
+
+The commitment record (§4.2) stores the Merkle root of ciphertext hashes, making the
+coordinator's verification purely local — no trusted third party required.
+
+#### 5.5.4 Multi-Receiver Amortization
+
+A key economic property of LTP: **commit cost is paid once; materialization cost is paid
+per receiver.**
+
+```
+Commit cost    = O(D · ρ)      paid by sender, once
+Lattice cost   = O(1)          per receiver (~1,300 bytes regardless of D)
+Materialize    = O(D · k/n)    per receiver (fetch k-of-n shards, decrypt, decode)
+```
+
+For a single sender broadcasting to $M$ receivers, the per-receiver amortized commit cost is
+$O(D \cdot \rho / M)$, approaching zero as $M$ grows. This is structurally different from
+direct transfer (where each receiver pays full $O(D)$ bandwidth) and from CDN delivery (where
+the origin still ships $O(D)$ to each edge node).
+
+| Transfer model | Sender bandwidth | Per-receiver bandwidth | Scales with M? |
+|---------------|-----------------|----------------------|----------------|
+| Direct (TCP) | O(D · M) | O(D) | No — sender is bottleneck |
+| CDN | O(D · edges) | O(D) | Partial — edge replication cost |
+| **LTP** | **O(D · ρ) once** | **O(D · k/n)** | **Yes — commit amortizes** |
+
+This amortization is the primary economic case for LTP over direct transfer when the same
+entity is materialized by many receivers or repeatedly over time.
+
+#### 5.5.5 TTL and Renewal
+
+Shard TTL is set at commit time via `CommitmentPricing.price(entity_size, replication_factor,
+ttl_seconds)`. At expiry:
+
+1. Nodes are released from their storage obligation
+2. Nodes MAY evict shards after TTL without penalty
+3. The commitment record on the append-only log is **never evicted** — the entity is proven
+   to have existed even after its shards are gone
+
+To extend availability, the sender (or any authorized party) calls
+`CommitmentPricing.renew(entity_id, additional_ttl)` and compensates nodes for the extension.
+Nodes that have already evicted shards before renewal MUST re-fetch and re-store to satisfy
+the renewed obligation — the commitment record provides the Merkle root to verify integrity of
+re-fetched shards without trusting the source.
+
+**Eviction ordering** (RECOMMENDED for implementations): nodes SHOULD evict lowest-renewal-value
+shards first, preserving entities with active TTL extensions. This is analogous to LRU cache
+eviction applied to economic value rather than recency.
+
 ---
 
 ## 6. Breaking the Constraints
@@ -2025,7 +2133,7 @@ Phase definitions:
 | Deterministic shard placement | No | DHT | DHT peers | Server-assigned | Server-assigned | **Consistent hash** |
 | Append-only audit log | No | No | No | No | No | **Yes** |
 | **Protocol complexity** | Low | Medium | Low | High | High | **Very High** |
-| **Production deployment maturity** | Ubiquitous | Production | Ubiquitous | Limited | Production | **Research prototype** |
+| **Production deployment maturity** | Ubiquitous | Production | Ubiquitous | Limited | Production | **Specification + production-benchmarked primitives; no deployed network** |
 | **Single-transfer overhead** | Minimal | Low | Low | Moderate | Moderate | **High (commit + lattice + materialize round-trips)** |
 
 † ZK privacy mode uses Groth16 over BLS12-381, which is **not post-quantum safe** (broken by

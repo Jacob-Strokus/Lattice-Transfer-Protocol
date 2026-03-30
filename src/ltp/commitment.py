@@ -19,6 +19,7 @@ from dataclasses import dataclass, field
 from typing import Optional
 
 from .primitives import H, H_bytes, MLDSA
+from ..merkle_log import MerkleTree, InclusionProof
 
 __all__ = [
     "AuditResult",
@@ -303,6 +304,10 @@ class CommitmentNetwork:
     def __init__(self) -> None:
         self.nodes: list[CommitmentNode] = []
         self.log = CommitmentLog()
+        # Per-entity shard hashes stored at commit time.
+        # Each entry: entity_id → [H_bytes(enc_shard_i || entity_id || i), ...]
+        # Used to build inclusion proofs and verify Merkle commitment integrity.
+        self._shard_hashes: dict[str, list[bytes]] = {}
 
     def add_node(self, node_id: str, region: str) -> CommitmentNode:
         node = CommitmentNode(node_id, region)
@@ -333,19 +338,31 @@ class CommitmentNetwork:
         """
         Distribute encrypted shards to commitment nodes.
 
-        Returns: Merkle root of encrypted shard hashes (for commitment record).
+        Returns: hex Merkle root of shard hashes (for CommitmentRecord.shard_map_root).
+
+        Each shard hash is H_bytes(enc_shard || entity_id || shard_index), binding
+        the hash to both the ciphertext and its position — prevents cross-entity and
+        cross-position substitution attacks.  The hashes form the leaves of a RFC 6962
+        Merkle tree whose root is stored in CommitmentRecord.shard_map_root.
+
+        Individual shards can later be proven against this root via
+        shard_inclusion_proof(), giving receivers a self-contained O(log n) proof
+        that a fetched shard was committed by the sender without trusting any node.
         """
-        shard_hashes = []
+        tree = MerkleTree()
+        shard_hashes: list[bytes] = []
 
         for i, enc_shard in enumerate(encrypted_shards):
-            shard_hash = H(enc_shard + entity_id.encode() + struct.pack('>I', i))
+            shard_hash = H_bytes(enc_shard + entity_id.encode() + struct.pack('>I', i))
             shard_hashes.append(shard_hash)
+            tree.append(shard_hash)
 
             target_nodes = self._placement(entity_id, i, replicas)
             for node in target_nodes:
                 node.store_shard(entity_id, i, enc_shard)
 
-        return H(''.join(shard_hashes).encode())
+        self._shard_hashes[entity_id] = shard_hashes
+        return tree.root().hex()
 
     def fetch_encrypted_shards(
         self, entity_id: str, n: int, k: int
@@ -370,6 +387,61 @@ class CommitmentNetwork:
 
         return fetched
 
+    def shard_inclusion_proof(
+        self, entity_id: str, shard_index: int
+    ) -> Optional[InclusionProof]:
+        """
+        Generate an O(log n) inclusion proof for a single committed shard.
+
+        A receiver uses this to verify that a fetched encrypted shard was
+        committed by the sender at shard_index, without needing any other
+        shard data.  Verify the proof against CommitmentRecord.shard_map_root:
+
+            proof = network.shard_inclusion_proof(entity_id, shard_index)
+            root  = bytes.fromhex(record.shard_map_root)
+            assert proof.verify(shard_hash, root)
+
+        where shard_hash = H_bytes(enc_shard || entity_id || shard_index).
+
+        Returns None if entity_id was not committed via this coordinator or
+        shard_index is out of range.
+        """
+        shard_hashes = self._shard_hashes.get(entity_id)
+        if shard_hashes is None or not (0 <= shard_index < len(shard_hashes)):
+            return None
+        tree = MerkleTree()
+        for sh in shard_hashes:
+            tree.append(sh)
+        return InclusionProof(
+            leaf_index=shard_index,
+            tree_size=tree.size,
+            audit_path=tree.audit_path(shard_index),
+            root_hash=tree.root(),
+        )
+
+    def verify_shard_commitment(self, entity_id: str) -> bool:
+        """
+        Verify that CommitmentRecord.shard_map_root matches the Merkle root
+        recomputed from the locally stored shard hashes.
+
+        This is a coordinator-level integrity check: if it fails, the commitment
+        record's shard_map_root was tampered with after shards were distributed —
+        a more severe violation than a single node audit failure.
+
+        Returns False if entity_id is unknown, has no committed record, or if the
+        roots diverge.
+        """
+        shard_hashes = self._shard_hashes.get(entity_id)
+        if not shard_hashes:
+            return False
+        record = self.log.fetch(entity_id)
+        if record is None:
+            return False
+        tree = MerkleTree()
+        for sh in shard_hashes:
+            tree.append(sh)
+        return tree.root().hex() == record.shard_map_root
+
     def audit_node(self, node: CommitmentNode, burst: int = 1) -> AuditResult:
         """
         Audit a single node via storage proof challenges.
@@ -390,6 +462,19 @@ class CommitmentNetwork:
             record = self.log.fetch(entity_id)
             if record is None:
                 continue
+
+            # Merkle integrity check: verify the commitment record's shard_map_root
+            # matches the root recomputed from locally stored shard hashes.  A mismatch
+            # indicates the commitment record was tampered with — skip this entity and
+            # count every expected shard as failed.
+            if not self.verify_shard_commitment(entity_id):
+                n_expected = record.encoding_params.get("n", 8)
+                for shard_index in range(n_expected):
+                    if node in self._placement(entity_id, shard_index):
+                        challenged += 1
+                        failed += 1
+                continue
+
             n = record.encoding_params.get("n", 8)
             for shard_index in range(n):
                 target_nodes = self._placement(entity_id, shard_index)
