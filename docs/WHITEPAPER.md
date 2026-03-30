@@ -2411,11 +2411,34 @@ the grounded scenarios in §§9.1–9.4.*
 1. ~~**Commitment network economics**: How are commitment nodes incentivized to store and serve shards?~~
    **Addressed in §5.5.** LTP defines economic interfaces (compensate, slash, pricing) without
    mandating a specific mechanism. Deployment-dependent: organizational SLA, mutual obligation,
-   or token/staking (see §5.5 table).
+   or token/staking. Storage cost decomposition, incentive alignment failure modes, audit
+   mechanism, multi-receiver amortization, and TTL renewal are fully specified in §§5.5.1–5.5.5.
 
-2. **Shard eviction**: When can shards be garbage collected? (Never? After TTL? After all authorized
-   receivers materialize?) **Partially addressed in §5.4.4** — TTL-based eviction with renewal.
-   Open: optimal TTL default, interaction between TTL expiry and in-flight lattice keys.
+2. ~~**Shard eviction**: When can shards be garbage collected? (Never? After TTL? After all authorized
+   receivers materialize?)~~
+   **Addressed in §§5.4.4 and 5.5.5.** TTL-based eviction with mandatory renewal is the
+   specified model. The two remaining sub-questions are resolved as follows:
+
+   **Optimal TTL default.** TTL is deployment-dependent and cannot be mandated by the protocol.
+   Guidance: the minimum TTL SHOULD be long enough to cover the expected receiver population's
+   materialize window plus a grace period. Recommended minimums by deployment class:
+
+   | Deployment class | Recommended minimum TTL |
+   |-----------------|------------------------|
+   | Consumer / ad-hoc | 30 days |
+   | Enterprise / internal | Duration of retention policy (often 7 years) |
+   | Public broadcast | Duration of the broadcast window + 90-day grace |
+   | Ephemeral (one-time) | 24 hours (matches access_policy one-shot constraint) |
+
+   **Interaction between TTL expiry and in-flight lattice keys.** A sealed lattice key may
+   outlive the shards it references if the sender sets a long access window but a short TTL.
+   Resolution: the `access_policy` field in the lattice key SHOULD include a `materialize_before`
+   timestamp that aligns with (or precedes) the shard TTL. Receivers that attempt to materialize
+   after `materialize_before` MUST receive an explicit error indicating TTL expiry, not a silent
+   reconstruction failure. Senders MUST NOT set `materialize_before` beyond the committed shard
+   TTL. If a receiver receives a valid lattice key but shards have been evicted, the correct
+   recovery is: contact the sender (if available) to re-commit the entity and issue a new lattice
+   key, or accept that the transfer window has closed.
 
 3. ~~**Commitment log consensus**: What consensus mechanism secures the append-only log?~~
    **Addressed in §5.1.2.** LTP does not require full BFT consensus. The commitment network is
@@ -2423,25 +2446,193 @@ the grounded scenarios in §§9.1–9.4.*
    Transparency–style Merkle log with trusted operators is sufficient.
 
 4. **Bandwidth for initial shard distribution**: The commit phase still requires distributing n
-   shards. Can this be amortized or pipelined?
+   shards across the commitment network. Can this be amortized or pipelined?
 
-5. **Real-time streaming**: Can LTP support continuous entity streams (video, telemetry), or is it
-   inherently batch-oriented?
+   *Partial analysis:* Two mitigations exist within the current protocol. First, the commit phase
+   is asynchronous — the sender distributes shards to commitment nodes independently of any
+   receiver, and the lattice key can be issued as soon as the commitment record is signed (not
+   after all shards land). Second, shard distribution is parallelizable across nodes; the
+   bottleneck is outbound bandwidth from the sender, not sequential round trips.
+   Full pipelining (streaming shards into a rolling commitment record) requires protocol
+   extensions and remains open.
+
+5. ~~**Real-time streaming**: Can LTP support continuous entity streams (video, telemetry), or is it
+   inherently batch-oriented?~~
+   **Design direction established.** LTP v0.1 is batch-oriented by construction: an EntityID
+   commits to a complete, immutable content hash. Streaming requires knowing the full content
+   before the EntityID can be computed. However, the protocol is extensible to streaming via a
+   **chunked stream model**:
+
+   **Why native streaming is structurally incompatible with v0.1.** The EntityID is defined as
+   `H(content || shape || timestamp || sender_pk)`. For a live stream, `content` is unknown at
+   commit time. Committing a partial hash and extending it later would break immutability — any
+   subsequent chunk would produce a different EntityID, invalidating all in-flight lattice keys.
+
+   **Chunked stream model (v0.2 direction).** Decompose a stream into fixed-size segments
+   (e.g., 64 KB–1 MB each), commit each segment as an independent LTP entity, and issue a
+   **stream manifest** — a separately committed entity whose content is the ordered list of
+   segment EntityIDs. Receivers materialize the manifest, then materialize segments in order or
+   in parallel. The manifest EntityID is the stable handle for the stream:
+
+   ```
+   StreamManifest {
+     stream_id:       H(stream_key || timestamp || sender_pk)
+     segment_ids:     [EntityID_0, EntityID_1, ..., EntityID_n]
+     segment_ttl:     seconds
+     is_final:        bool   -- false while stream is live
+   }
+   ```
+
+   Live streams use a **rolling manifest** committed at regular intervals with `is_final = false`.
+   Receivers poll the manifest for new segment EntityIDs and materialize ahead. Once the stream
+   ends, the manifest is re-committed with `is_final = true` and an updated segment list.
+
+   **Overhead analysis.** Per-segment commit cost at 64 KB (from §6.5 benchmarks):
+   BLAKE3 hash (~13 µs) + RS encode (~0.12 ms) + AEAD encrypt × 8 (~0.28 ms) + ML-DSA sign
+   (~0.39 ms) ≈ 0.8 ms per segment. At 64 KB segments and 1 ms commit latency, maximum
+   sustainable commit throughput is ~64 MB/s — sufficient for all but the highest-bitrate
+   video streams. For 4K video at 25 Mbps: one 64 KB segment every ~20 ms; commit latency
+   (0.8 ms) is well within the segment window.
+
+   **v0.1 workaround.** For deployments that cannot wait for v0.2: buffer the stream into
+   segments ≥ 64 KB, commit each independently, and distribute segment EntityIDs to receivers
+   out-of-band. This is operationally equivalent to the chunked stream model without protocol
+   support for the rolling manifest.
 
 6. **Audit protocol formalization**: The storage proof challenge-response (§5.2.2) is lightweight
    but weaker than Filecoin's PoSt. A node that re-fetches data just before an audit passes
    dishonestly. Can time-bounded challenges be tightened without requiring SNARKs?
 
-7. **Cross-deployment federation**: How do independently bootstrapped LTP networks discover and
-   trust each other's commitment nodes?
+   *Partial analysis:* The burst-challenge mechanism in §5.2.2 multiplies the relay latency of a
+   dishonest node by the burst factor, making outsourcing statistically detectable. Full PoSt
+   (Proof of Spacetime) requires a VDF (Verifiable Delay Function) or periodic SNARK-based
+   proofs, which add significant complexity. A practical middle ground — continuous background
+   audits with randomized timing and exponentially increasing burst sizes at the first failed
+   challenge — would catch most re-fetch attacks without SNARKs. Formal specification deferred
+   to a future version.
 
-8. **ZK Transfer Mode extensions**: §3.2 specifies a Groth16-based hiding commitment for
+7. ~~**Cross-deployment federation**: How do independently bootstrapped LTP networks discover and
+   trust each other's commitment nodes?~~
+   **Design direction established.** Federation between independent LTP deployments (networks
+   with different commitment log operators) is resolved via a **bilateral trust anchor** model
+   analogous to X.509 cross-certification:
+
+   **Problem.** A receiver in Network A wants to materialize an entity whose shards reside in
+   Network B. Network A's commitment log does not know Network B's node keys, and Network A's
+   receiver has no basis to verify Network B's inclusion proofs.
+
+   **Resolution: Federation Records.** A network operator publishes a signed **FederationRecord**
+   in their commitment log:
+
+   ```
+   FederationRecord {
+     peer_network_id:    string            -- stable identifier for the peer network
+     peer_log_operator_vk: bytes           -- ML-DSA-65 verification key of peer's log operator
+     peer_log_endpoint:  URI               -- where to fetch STHs and inclusion proofs
+     trust_scope:        ["materialize"]   -- what this federation authorizes
+     valid_from:         timestamp
+     valid_until:        timestamp
+     signature:          bytes             -- signed by this network's log operator
+   }
+   ```
+
+   A receiver in Network A that encounters a shard_map commitment from Network B:
+   1. Resolves `peer_network_id` → `FederationRecord` in Network A's log
+   2. Verifies the `FederationRecord` signature against Network A's operator key (already trusted)
+   3. Uses `peer_log_operator_vk` to verify Network B's STH
+   4. Verifies the shard's Merkle inclusion proof against Network B's verified STH root
+   5. Proceeds with shard fetch from Network B's nodes
+
+   **Discovery.** Networks announce federation availability via their commitment log. A gossip
+   overlay — analogous to BGP route advertisement — propagates `FederationRecord`s between
+   networks that share at least one common peer. Equivocation detection (§5.1.4.2) applies
+   per-peer: if a peer network's operator publishes inconsistent STHs, the federation is
+   automatically suspended and evidence is recorded in the local commitment log.
+
+   **Trust scope.** Federation records are scoped — a network may allow cross-network
+   materialization (`"materialize"`) without allowing cross-network commit (`"commit"`).
+   Enterprise deployments typically federate for read-only materialization while keeping
+   commit authority local.
+
+   Full protocol specification (record format, gossip wire format, scope semantics) deferred
+   to a future version; the model is sufficiently defined to begin implementation.
+
+8. ~~**ZK Transfer Mode extensions**: §3.2 specifies a Groth16-based hiding commitment for
    entity_id privacy, but defers two significant capabilities: (a) content-property proofs —
    circuit composition for application-layer predicates (JSON schema, range proofs, etc.); and
    (b) post-quantum ZK — replacing the BLS12-381 pairing with a STARK or lattice-based proof
    system that resists Shor's algorithm. What is the appropriate circuit composition model for
    (a), and which post-quantum proof system best balances proof size, generation time, and
-   absence of trusted setup for (b)?
+   absence of trusted setup for (b)?~~
+   **Design direction established.**
+
+   **(a) Content-property proofs.** The existing hiding commitment circuit takes
+   `(entity_id, r)` as private inputs and produces `blind_id = Poseidon(entity_id || r)` as the
+   public output. Content-property proofs extend this by adding application-layer predicates as
+   additional R1CS constraints in the same circuit:
+
+   ```
+   Circuit: HidingCommitmentWithPredicate
+     Private inputs:  entity_id, r, content_witness
+     Public inputs:   blind_id, predicate_id
+     Constraints:
+       (1) blind_id = Poseidon(entity_id || r)           -- existing hiding commitment
+       (2) entity_id = H(content_witness || shape || ts) -- content binding
+       (3) predicate(content_witness) = true             -- application predicate
+   ```
+
+   The `predicate` circuit encodes the application claim — for example:
+   - **Schema validation**: `content_witness` decodes as valid JSON matching a known schema hash
+   - **Range proof**: a numeric field in `content_witness` falls within `[lo, hi]`
+   - **Membership**: `content_witness` is in a committed set (Merkle membership)
+
+   Composition constraint: each predicate adds its R1CS constraints to the base circuit. Proof
+   generation cost scales with total constraint count. At 1M constraints, Groth16 proof
+   generation takes ~2–5 seconds on commodity hardware; complex JSON schema validation with
+   field extraction may require 500K–2M constraints depending on schema complexity.
+
+   **(b) Post-quantum ZK upgrade path.** Groth16 over BLS12-381 is broken by Shor's algorithm
+   (the pairing relies on elliptic curve discrete log hardness). The replacement must be
+   quantum-resistant. The viable options, evaluated against LTP's constraints:
+
+   | System | Trusted setup | Proof size | PQ-safe? | Maturity |
+   |--------|--------------|-----------|---------|---------|
+   | Groth16 / BLS12-381 | Yes (per-circuit) | ~200 bytes | **No** | Production |
+   | PLONK / KZG | Yes (universal) | ~400–800 bytes | **No** | Production |
+   | STARKs (FRI) | **None** | 40–400 KB | **Yes** | Production (StarkWare, SP1) |
+   | Lattice SNARKs (Banquet, etc.) | None | 10–100 KB | **Yes** | Research |
+   | Hash-based (Ligero, Aurora) | None | 100 KB–1 MB | **Yes** | Research |
+
+   **Recommended upgrade path: STARKs.** STARKs (Scalable Transparent ARguments of Knowledge)
+   are the only production-ready post-quantum ZK system. They use hash functions (SHA-3 or
+   Poseidon over prime fields) for polynomial commitments via FRI, have no trusted setup, and
+   resist Shor's algorithm because they make no elliptic-curve assumptions.
+
+   The LTP ZK Transfer Mode upgrade proceeds in two steps:
+
+   **Step 1 — Poseidon alignment (preparatory, no proof system change).** Replace the
+   `blind_id` hash from `Poseidon(entity_id || r)` over BLS12-381 scalar field to
+   `Poseidon(entity_id || r)` over a STARK-friendly prime field (e.g., Goldilocks p = 2⁶⁴ − 2³²
+   + 1, used by Plonky2/SP1). This preserves the hiding commitment semantics while making the
+   circuit portable to a STARK backend. The lattice key format is unchanged; only the circuit
+   and `blind_id` field interpretation change.
+
+   **Step 2 — Proof system swap.** Replace the Groth16 proof attached to the lattice key with a
+   STARK proof generated by a zkVM (SP1, RISC Zero) or a custom STARK circuit. The verifier at
+   the commitment log replaces the Groth16 verifier with a STARK verifier (a hash-function-only
+   computation, itself post-quantum). Proof sizes increase from ~200 bytes to ~40–400 KB
+   depending on circuit complexity; this is the honest cost of quantum resistance.
+
+   Content-property predicates (sub-question a) translate directly: the same R1CS constraint
+   composition model applies inside a STARK circuit, using Poseidon as the hash primitive. No
+   separate design is required; the STARK circuit is the composition vehicle for both the hiding
+   commitment and the application predicate.
+
+   **Transition compatibility.** The `lattice_key.zk_mode` field (introduced in the upgrade)
+   signals which proof system is in use (`"groth16"` | `"stark"`). Receivers and commitment
+   logs that support both can verify either. Networks that do not yet support STARK verification
+   continue using standard mode (no ZK) until upgraded. This provides a clean migration path
+   without a flag-day cutover.
 
 ---
 
