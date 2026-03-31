@@ -92,7 +92,10 @@ ML-DSA-65 · BLAKE3 · Certificate Transparency · Reed-Solomon coding
         - [3.3.4 Commitment Non-Repudiation (EUF-CMA)](#334-commitment-non-repudiation-euf-cma)
         - [3.3.5 Threshold Secrecy (Information-Theoretic)](#335-threshold-secrecy-information-theoretic)
         - [3.3.6 Transfer Immutability (Composite Game)](#336-transfer-immutability-composite-game)
-        - [3.3.7 What Cannot Be Formally Proven](#337-what-cannot-be-formally-proven)
+        - [3.3.7 Ephemeral Sender Forward Secrecy](#337-ephemeral-sender-forward-secrecy)
+        - [3.3.8 Access Control Policy Integrity](#338-access-control-policy-integrity)
+        - [3.3.9 Multi-Receiver Independence](#339-multi-receiver-independence)
+        - [3.3.10 What Cannot Be Formally Proven](#3310-what-cannot-be-formally-proven)
 - [4. Immutability Guarantees](#4-immutability-guarantees)
     - [4.1 Why Immutability Is Inherent](#41-why-immutability-is-inherent)
     - [4.2 Versioning vs. Mutation](#42-versioning-vs-mutation)
@@ -804,11 +807,31 @@ $$\mathsf{Adv}^{\text{IMM}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{CR}}
 
 where $\mathsf{Adv}^{\text{CR}}_{H}$ is the collision-resistance advantage against $H$.
 
-*Proof.* Reduction: Given $\mathcal{A}$ that wins IMM, construct $\mathcal{B}$ that breaks
-collision resistance of $H$. $\mathcal{B}$ runs $\mathcal{A}$ and receives $(e, e')$ with
-$e \neq e'$ and $H(\text{encode}(e)) = H(\text{encode}(e'))$. Since $e \neq e'$ implies
-$\text{encode}(e) \neq \text{encode}(e')$ (encoding is injective), $\mathcal{B}$ outputs
-$(\text{encode}(e), \text{encode}(e'))$ as a collision for $H$. ∎
+*Proof.* We construct a PPT reduction $\mathcal{B}^H$ that uses any IMM adversary $\mathcal{A}$
+as a black-box subroutine to break collision resistance of $H$.
+
+**Algorithm $\mathcal{B}^H(1^\lambda)$:**
+1. Forward the hash function $H$ and all protocol parameters to $\mathcal{A}(1^\lambda)$.
+2. Receive the pair $(e, e')$ output by $\mathcal{A}$.
+3. Compute $m \leftarrow \text{encode}(e)$ and $m' \leftarrow \text{encode}(e')$.
+4. Output the pair $(m, m')$.
+
+**Correctness.** If $\mathcal{A}$ wins the IMM game, then by definition $e \neq e'$ and
+$\text{EntityID}(e) = \text{EntityID}(e')$, i.e., $H(\text{encode}(e)) = H(\text{encode}(e'))$.
+The entity encoding function $\text{encode} : \mathcal{E} \to \{0,1\}^*$ is injective —
+distinct entities $(e \neq e')$ produce distinct canonical byte representations, since
+content, shape, and timestamp are all encoded deterministically and unambiguously into
+the input. Therefore $e \neq e'$ implies $m \neq m'$, and $(m, m')$ is a valid
+collision for $H$.
+
+**Probability.** Every IMM win by $\mathcal{A}$ produces a valid CR collision for $\mathcal{B}$:
+
+$$\Pr[\mathcal{B} \text{ wins CR}] = \Pr[\mathcal{A} \text{ wins IMM}]$$
+
+$$\therefore \quad \mathsf{Adv}^{\text{IMM}}_\mathcal{A}(\lambda) \leq \mathsf{Adv}^{\text{CR}}_H(\lambda)$$
+
+**Efficiency.** $\mathcal{B}$ is PPT: it runs $\mathcal{A}$ once (PPT by assumption) and performs
+$O(1)$ additional computation. ∎
 
 **Concrete security.** The theorem holds for any $n$-bit collision-resistant $H$. The
 canonical choice is **BLAKE3-256** ($n = 256$); BLAKE2b-256 is an equally valid alternative
@@ -914,23 +937,86 @@ into two independent attack surfaces:
 
 $$\mathsf{Adv}^{\text{TCONF,enc}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) + \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}(\lambda)$$
 
-*Proof sketch (encrypted components only).* We proceed via a sequence of games, treating
-entity_id as a fixed public value and bounding only attacks on the cryptographic components:
+*Proof (encrypted components only; entity_id fingerprinting is separately acknowledged above
+as $\mathsf{Adv}^{\text{ID}}_\mathcal{A} = 1$, not bounded here).* We proceed via a hybrid
+argument through three games with explicit reductions for each transition. Let
+$p_i = \Pr[\mathcal{A} \text{ outputs } 1 \mid \text{Game}_i]$.
 
-- **Game 0** = TCONF restricted to attacks on the sealed key and AEAD shards.
-- **Game 1**: Replace ML-KEM shared secret with random. By ML-KEM IND-CCA security,
-  $|\Pr[G_0] - \Pr[G_1]| \leq \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}$.
-  Now the sealed key is a random encryption — independent of $b$.
-- **Game 2**: Replace AEAD encryptions of shards with encryptions of zeros. By AEAD
-  IND-CPA security, $|\Pr[G_1] - \Pr[G_2]| \leq \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}$.
-  Now the shard ciphertexts are independent of $b$.
+**Game 0** (real protocol, encrypted-component view): Same as TCONF but $\mathcal{A}$'s
+entity_id fingerprinting path is excluded — $\mathcal{A}$'s advantage is derived entirely
+from the sealed lattice key and AEAD-encrypted shards.
 
-In Game 2, restricted to the encrypted components, the adversary's view is independent of
-$b$, so $\Pr[G_2] = 1/2$. By the triangle inequality:
+---
 
-$$|\Pr[G_0] - 1/2| \leq \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}} + \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}$$
+**Game 0 → Game 1: Replace ML-KEM shared secret with uniform random.**
 
-which yields the stated bound. ∎
+We construct $\mathcal{B}_\text{KEM}$ that uses $\mathcal{A}$ to break ML-KEM IND-CCA.
+
+**Algorithm $\mathcal{B}_\text{KEM}^\mathcal{A}$** (receives ML-KEM challenge $(ek^*, ct^*, K^*)$
+where $K^*$ is either the real shared secret or a uniformly random value):
+1. Set the receiver's encapsulation key to $ek^*$. Generate the sender's ML-DSA keypair
+   $(vk, sk)$ honestly.
+2. Run $\mathcal{A}(1^\lambda)$ to receive $(e_0, e_1)$. Sample $b \leftarrow \{0,1\}$.
+3. **COMMIT phase:** RS-encode $e_b$ into shards. Sample a fresh CEK. AEAD-encrypt each shard
+   under CEK with nonce $\eta_i = H(\text{CEK} \| entity\_id \| i)[{:}\text{nonce\_len}]$.
+   Sign and write the commitment record.
+4. **LATTICE phase:** Construct inner\_payload $= (entity\_id_b, \text{CEK}, commitment\_ref,
+   policy)$. Use $K^*$ as the ML-KEM shared secret: compute nonce, AEAD-encrypt
+   inner\_payload under $K^*$. Set sealed\_key $= (ct^*, \mathsf{AEAD}_{K^*}(\text{inner\_payload}))$.
+5. Give $\mathcal{A}$ the commitment log entry, all shard ciphertexts, and sealed\_key.
+   Receive $b'$ from $\mathcal{A}$.
+6. Output $1$ if $b' = b$, else $0$.
+
+If $K^*$ is the real ML-KEM shared secret, $\mathcal{A}$'s view is identical to Game 0.
+If $K^*$ is uniform random, the sealed key is independent of the inner payload's content
+(hence independent of $b$) — this is Game 1. Therefore:
+
+$$|p_0 - p_1| \leq \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda)$$
+
+---
+
+**Game 1 → Game 2: Replace AEAD shard ciphertexts with encryptions of zeros.**
+
+In Game 1, the sealed key is keyed by a uniform random value — already independent of $b$.
+We now make the shard ciphertexts independent of $b$ as well.
+
+**Algorithm $\mathcal{B}_\text{AEAD}^\mathcal{A}$** (receives AEAD left-or-right oracle
+$\mathsf{LR}_{K_\text{CEK}}(\cdot, \cdot, \cdot)$ for unknown key $K_\text{CEK}$):
+1. Generate all keypairs honestly. Run $\mathcal{A}$ to receive $(e_0, e_1)$.
+   Sample $b \leftarrow \{0,1\}$.
+2. RS-encode $e_b$ to get plaintext shards $\{s_i^{(b)}\}_{i=0}^{n-1}$.
+   Compute nonces $\eta_i = H(\text{CEK} \| entity\_id \| i)[{:}\text{nonce\_len}]$.
+3. For each shard $i$, submit $(s_i^{(b)},\ 0^{|s_i|},\ \eta_i)$ to $\mathsf{LR}$;
+   receive challenge ciphertext $c_i$.
+4. Simulate Game 1: replace sealed key with an independently random value (independent of $b$,
+   consistent with Game 1).
+5. Give $\mathcal{A}$ the sealed key (random) and $\{c_i\}$. Receive $b'$.
+6. Output $b'$ as $\mathcal{B}_\text{AEAD}$'s distinguisher bit.
+
+If $\mathsf{LR}$ encrypts the left input (real shards), $\mathcal{A}$'s view is Game 1.
+If $\mathsf{LR}$ encrypts the right input (all zeros), $\mathcal{A}$'s view is Game 2.
+Therefore:
+
+$$|p_1 - p_2| \leq \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}(\lambda)$$
+
+---
+
+**Game 2 analysis.** In Game 2, the sealed key is uniformly random (independent of $b$)
+and all shard ciphertexts are encryptions of the zero string (independent of $b$).
+Restricted to encrypted components, $\mathcal{A}$'s entire view is independent of $b$, so
+$p_2 = 1/2$ exactly.
+
+**Combining.** By the triangle inequality:
+
+$$\left|\Pr[\mathcal{A} \text{ wins Game 0}] - \frac{1}{2}\right|
+  = |p_0 - \tfrac{1}{2}|
+  \leq |p_0 - p_1| + |p_1 - p_2| + |p_2 - \tfrac{1}{2}|
+  = |p_0 - p_1| + |p_1 - p_2|$$
+
+$$\leq \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) + \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}(\lambda)$$
+
+Both reductions are PPT: each runs $\mathcal{A}$ once and performs $O(n)$ additional
+operations (one per shard). ∎
 
 **Practical security.** For most real-world entities (large files, cryptographic keys,
 rich documents), the entity space has sufficient min-entropy that EntityID fingerprinting
@@ -1051,29 +1137,109 @@ Game TIMM:
 
 $$\mathsf{Adv}^{\text{TIMM}}_{\mathcal{A}}(\lambda) \leq \mathsf{Adv}^{\text{CR}}_{H}(\lambda) + \mathsf{Adv}^{\text{EUF-CMA}}_{\text{ML-DSA}}(\lambda) + \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}(\lambda) + \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda)$$
 
-*Proof.* Viable attack paths against the TIMM game require breaking *multiple* barriers
-simultaneously. The principal attack paths are:
+*Proof.* We partition $\mathcal{A}$'s winning strategies into four exhaustive attack paths
+and construct an explicit PPT reduction for each.
 
-- **Path A (shard substitution):** Substitute AEAD ciphertexts (breaking AEAD AUTH) **and**
-  find $e'$ with $H(e') = H(e)$ that passes the final integrity check (breaking CR).
+**Case analysis.** For the receiver to accept $e' \neq e$, the MATERIALIZE phase must
+complete without aborting. Inspection of the MATERIALIZE algorithm (§2.3.1) reveals
+exactly four conditions that must hold simultaneously for $\mathcal{A}$ to win:
 
-- **Path B (commitment forgery):** Forge a commitment record pointing to an attacker-controlled
-  Merkle root (breaking EUF-CMA) **and** modify the sealed key to reference the forged
-  record (breaking ML-KEM IND-CCA).
+- **Path A:** At least one substituted shard ciphertext $c_i^*$ passes AEAD authentication —
+  i.e., $\mathcal{A}$ forges a valid AEAD tag.
+- **Path B:** A fraudulent commitment record carrying a forged shard\_map\_root is accepted —
+  i.e., $\mathcal{A}$ forges an ML-DSA-65 signature on a message it did not query.
+- **Path C:** $\mathcal{A}$ extracts the CEK from the sealed key and re-encrypts fraudulent
+  shards — i.e., $\mathcal{A}$ breaks ML-KEM IND-CCA.
+- **Path D:** $\mathcal{A}$ produces $e' \neq e$ such that $H(e') = H(e) = entity\_id$,
+  passing the final receiver integrity check — i.e., $\mathcal{A}$ finds a hash collision.
 
-- **Path C (key extraction + content substitution):** Extract the CEK from the sealed key
-  (breaking ML-KEM IND-CCA) **and** substitute entity content that passes the hash check
-  (breaking CR).
+Each path requires breaking exactly one primitive. By the union bound:
 
-Each path's success probability is a *product* of two or more barrier advantages, which is
-dominated by the largest single-barrier advantage in the product. Since each path requires
-at least one of the four barrier advantages, the union bound over the individual barrier
-advantages remains valid:
+$$\mathsf{Adv}^{\text{TIMM}}_\mathcal{A} \leq
+  \Pr[\text{Path A}] + \Pr[\text{Path B}] + \Pr[\text{Path C}] + \Pr[\text{Path D}]$$
 
-$$\mathsf{Adv}^{\text{TIMM}} \leq \mathsf{Adv}^{\text{CR}}_{H} + \mathsf{Adv}^{\text{EUF-CMA}}_{\text{ML-DSA}} + \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}} + \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}$$
+We bound each term with an explicit reduction.
 
-This sum bound is conservative — the multi-barrier composition means the protocol's actual
-security is stronger than any single component. ∎
+---
+
+**Reduction $\mathcal{B}_\text{AUTH}$ (Path A $\to$ AEAD authentication forgery):**
+
+$\mathcal{B}_\text{AUTH}$ receives access to an AEAD encryption oracle $\mathsf{Enc}_{K_\text{CEK}}$
+for unknown key $K_\text{CEK}$.
+
+1. Run honest setup. Generate a fresh CEK; use $\mathsf{Enc}_{K_\text{CEK}}$ to encrypt
+   each shard (providing the real AEAD ciphertexts to $\mathcal{A}$).
+2. Run $\mathcal{A}$ through the full TIMM game, simulating the commitment network faithfully.
+3. Observe every shard ciphertext $c_i^*$ that $\mathcal{A}$ delivers to the simulated receiver.
+4. If any $c_i^* \neq c_i$ is accepted by AEAD decryption (i.e., the tag verifies),
+   output $(c_i^*, \eta_i)$ as an AEAD forgery.
+
+If $\mathcal{A}$ wins via Path A, some modified $c_i^*$ passes authentication — a valid
+AEAD forgery. Thus $\Pr[\mathcal{B}_\text{AUTH} \text{ wins}] \geq \Pr[\mathcal{A} \text{ wins via Path A}]$.
+
+---
+
+**Reduction $\mathcal{B}_\text{DSA}$ (Path B $\to$ ML-DSA-65 EUF-CMA forgery):**
+
+$\mathcal{B}_\text{DSA}$ receives ML-DSA-65 challenge key $vk^*$ and signing oracle
+$\mathsf{Sign}_{sk^*}(\cdot)$.
+
+1. Embed $vk^*$ as the sender's verification key. Set up all other components honestly.
+2. Simulate the commitment log: all commitment records legitimately signed by $S$ are signed
+   via queries to $\mathsf{Sign}_{sk^*}$.
+3. Run $\mathcal{A}$ through TIMM. Monitor the commitment log for any record $c^*$ that
+   (a) carries a valid signature verifying under $vk^*$ and (b) was not submitted to
+   $\mathsf{Sign}_{sk^*}$ by $\mathcal{B}_\text{DSA}$.
+4. If such $(c^*, \sigma^*)$ appears and $\mathcal{A}$ wins, output $(c^*, \sigma^*)$ as
+   an EUF-CMA forgery.
+
+If $\mathcal{A}$ wins via Path B, it produced a validly-signed commitment record not
+queried to the oracle — a textbook EUF-CMA forgery. Thus
+$\Pr[\mathcal{B}_\text{DSA} \text{ wins}] \geq \Pr[\mathcal{A} \text{ wins via Path B}]$.
+
+---
+
+**Reduction $\mathcal{B}_\text{KEM}$ (Path C $\to$ ML-KEM IND-CCA):**
+
+$\mathcal{B}_\text{KEM}$ receives ML-KEM IND-CCA challenge $(ek^*, ct^*, K^*)$ and decapsulation
+oracle $\mathsf{Decaps}_{dk^*}(\cdot)$ for queries $ct \neq ct^*$.
+
+1. Set the receiver's encapsulation key to $ek^*$. Generate all other components honestly.
+2. Seal the lattice key using $ct^*$ and encrypt the inner payload under $K^*$. Give $\mathcal{A}$
+   this sealed key. Forward any decapsulation queries from $\mathcal{A}$ (for $ct \neq ct^*$)
+   to $\mathsf{Decaps}_{dk^*}$.
+3. Run $\mathcal{A}$ through TIMM. If $\mathcal{A}$ wins without triggering Path A, B, or D
+   (i.e., wins via extracting the CEK), then $K^*$ was the real shared secret (since if $K^*$
+   were random, the inner payload would be independently encrypted and the CEK would be
+   unrecoverable without breaking AEAD). Output $1$ (real).
+4. Otherwise output $0$ (random).
+
+$\Pr[\mathcal{B}_\text{KEM} \text{ wins IND-CCA}] \geq \Pr[\mathcal{A} \text{ wins via Path C}]$.
+
+---
+
+**Reduction $\mathcal{B}_\text{CR}$ (Path D $\to$ collision resistance of $H$):**
+
+$\mathcal{B}_\text{CR}$ runs the TIMM game honestly.
+
+1. Commit entity $e$ as normal. Record $entity\_id = H(e)$.
+2. Run $\mathcal{A}$ through TIMM. At MATERIALIZE, intercept the reconstructed entity $e'$
+   and the receiver's final check $H(e') \stackrel{?}{=} entity\_id$.
+3. If $\mathcal{A}$ wins and $e' \neq e$ but $H(e') = H(e)$, output $(e', e)$ as a
+   collision for $H$.
+
+$\Pr[\mathcal{B}_\text{CR} \text{ wins CR}] \geq \Pr[\mathcal{A} \text{ wins via Path D}]$.
+
+---
+
+**Combining.** All four reductions are PPT (each runs $\mathcal{A}$ once plus $O(n)$
+overhead). Substituting into the union bound:
+
+$$\mathsf{Adv}^{\text{TIMM}}_\mathcal{A}(\lambda) \leq
+  \mathsf{Adv}^{\text{AUTH}}_\text{AEAD}(\lambda) +
+  \mathsf{Adv}^{\text{EUF-CMA}}_\text{ML-DSA}(\lambda) +
+  \mathsf{Adv}^{\text{IND-CCA}}_\text{ML-KEM}(\lambda) +
+  \mathsf{Adv}^{\text{CR}}_H(\lambda) \qquad \square
 
 **This is LTP's strongest security theorem.** It is a composite reduction that chains four
 standard cryptographic assumptions. Under NIST Level 3 security (ML-KEM-768 + ML-DSA-65
@@ -1081,7 +1247,217 @@ standard cryptographic assumptions. Under NIST Level 3 security (ML-KEM-768 + ML
 while BLAKE3-256 provides ~85-bit post-quantum collision resistance (BHT bound) and
 128-bit post-quantum preimage resistance (Grover bound).
 
-#### 3.3.7 What Cannot Be Formally Proven
+#### 3.3.7 Ephemeral Sender Forward Secrecy
+
+**Definition (FS game).** Forward secrecy games measure what an adversary learns by
+compromising long-term state *after* a protocol run. The FS game models compromise of
+the *sender's* post-transfer state.
+
+```
+Game FS:
+  1. Challenger generates receiver R's ML-KEM keypair (ek, dk) and
+     sender S's ML-DSA keypair (vk, sk).
+  2. Sender seals a lattice key to R:
+       (SS, ct) ← Encaps(ek)
+       sealed_key = (ct, AEAD_SS(inner_payload))
+     SS and all Encaps randomness are destroyed immediately after this step.
+  3. Adversary A receives sealed_key and then receives S's long-term
+     state: (sk, vk) and any sender-side state NOT destroyed in step 2.
+  4. A outputs a candidate CEK.
+  5. A wins if the output equals the CEK in inner_payload.
+```
+
+**Theorem 9 (Ephemeral Sender Forward Secrecy).** For any PPT adversary $\mathcal{A}$:
+
+$$\mathsf{Adv}^{\text{FS}}_\mathcal{A}(\lambda) \leq
+  \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) +
+  \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}(\lambda)$$
+
+*Proof.* After SS and Encaps randomness are destroyed, the sender retains only $(sk, vk)$
+and public parameters — none of which appear in the derivation of SS or CEK. To recover
+CEK from sealed\_key $= (ct, c)$, $\mathcal{A}$ must pursue one of two paths:
+
+**Path 1 (recover SS from ct):** Compute $SS \leftarrow \mathsf{Decaps}(dk, ct)$ to then
+AEAD-decrypt $c$. But $\mathcal{A}$ does not hold $dk$ (only the sender's state was given).
+Recovering SS from $ct$ without $dk$ requires breaking ML-KEM IND-CCA.
+
+Reduction $\mathcal{B}_\text{KEM}$: receives challenge $(ek^*, ct^*, K^*)$. Sets receiver's
+$ek = ek^*$, uses $K^*$ as SS to construct sealed\_key $= (ct^*, \mathsf{AEAD}_{K^*}
+(\text{inner\_payload}))$. Gives $\mathcal{A}$ sealed\_key and sender state. If $K^*$ is
+random, $\mathcal{A}$'s view contains no information about CEK via this path. If $\mathcal{A}$
+recovers CEK, then $K^*$ is real and $\mathcal{B}_\text{KEM}$ wins IND-CCA.
+
+**Path 2 (AEAD-decrypt without SS):** Produce CEK from $c = \mathsf{AEAD}_{SS}
+(\text{inner\_payload})$ without knowing $SS$. This requires breaking AEAD IND-CPA.
+
+Both reductions are PPT. By the union bound, the stated bound holds. ∎
+
+**Critical limitation — receiver DK compromise does not provide forward secrecy.**
+The FS game above gives the adversary the *sender's* long-term state, not the receiver's.
+This is intentional: it correctly models sender-side forward secrecy.
+
+**LTP does NOT provide forward secrecy against receiver DK compromise.** If a receiver's
+decapsulation key $dk$ is compromised, the adversary can compute
+$SS \leftarrow \mathsf{Decaps}(dk, ct)$ on any stored ciphertext $ct$ from sealed\_key
+and then AEAD-decrypt the inner payload to extract the CEK. All historical sealed keys
+issued to that receiver's $ek$ are retrospectively decryptable.
+
+This is a fundamental property of static-key KEM schemes. True forward secrecy against the
+decapsulating party requires the decapsulator to contribute fresh ephemeral randomness (as
+in ephemeral Diffie-Hellman). ML-KEM uses a static long-term $dk$; the sender contributes
+all ephemeral randomness. Compromise of $dk$ therefore retroactively exposes all prior
+encapsulations to $ek$.
+
+**Mitigations for deployments with receiver-compromise threat models:**
+- Rotate receiver keypairs regularly; new sealed keys use the new $ek$
+- Store $dk$ in hardware (HSM/TPM) with extraction prevention
+- Treat sealed keys as time-limited; re-seal to a fresh $ek$ after any suspected compromise
+
+This limitation is acknowledged in §3.3.10.
+
+---
+
+#### 3.3.8 Access Control Policy Integrity
+
+The `access_policy` field is sealed inside the AEAD-encrypted inner payload of the lattice
+key. This section proves that an adversary cannot forge a lattice key with a more permissive
+policy than the sender issued — i.e., the policy cannot be modified without detection.
+
+**Note on policy integrity vs. policy enforcement.** *Policy integrity* (proven here)
+guarantees that the policy field cannot be altered without breaking a cryptographic primitive.
+*Policy enforcement* — e.g., that a commitment node refuses to serve a second materialization
+after a one-shot key is used — is a deployment property requiring the commitment layer to
+track per-key usage state. Enforcement is outside the scope of this theorem.
+
+**Definition (ACAP game).**
+
+```
+Game ACAP:
+  1. Challenger generates keypairs for sender S and receiver R.
+  2. Challenger seals a lattice key to R with sender-chosen policy P.
+     A receives the sealed key.
+  3. A may query an Unseal oracle (simulating R decapsulating the key);
+     oracle returns inner_payload contents.
+  4. A outputs a sealed key K* that, when unsealed by R
+     (Decaps + AEAD decrypt succeeds), yields a payload with policy P' ≠ P.
+  5. A wins if K* unseals successfully and the extracted policy P' ≠ P.
+```
+
+**Theorem 10 (Policy Integrity).** For any PPT adversary $\mathcal{A}$:
+
+$$\mathsf{Adv}^{\text{ACAP}}_\mathcal{A}(\lambda) \leq
+  \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) +
+  \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}(\lambda)$$
+
+*Proof.* For $\mathcal{A}$ to win ACAP, it must output $(ct^*, c^*)$ such that
+$\mathsf{Decaps}(dk, ct^*)$ succeeds returning $SS^*$, and
+$\mathsf{AEAD.Decrypt}(SS^*, c^*)$ succeeds returning inner\_payload with $P' \neq P$.
+Two paths:
+
+**Path 1 (recover SS, re-encrypt with modified policy):** $\mathcal{A}$ recovers $SS$
+from an existing $ct$ using only $ek$ (without $dk$), constructs modified inner\_payload
+with $P' \neq P$, and AEAD-encrypts under $SS$. Recovering $SS$ from $ct$ without $dk$
+requires breaking ML-KEM IND-CCA.
+
+Reduction $\mathcal{B}_\text{KEM}$: embeds the ML-KEM challenge key as $R$'s $ek$. Simulates
+the ACAP game. Forwards Unseal oracle queries to the IND-CCA decapsulation oracle (excluding
+the challenge ciphertext). If $\mathcal{A}$ wins via Path 1, $\mathcal{B}_\text{KEM}$ uses
+the recovered $SS$ to win IND-CCA.
+
+**Path 2 (forge AEAD ciphertext without SS):** $\mathcal{A}$ constructs $c^*$ that
+$\mathsf{AEAD.Decrypt}(SS, \cdot)$ accepts as valid, yielding a payload with $P' \neq P$,
+without knowing $SS$. This is an AEAD authentication forgery.
+
+Reduction $\mathcal{B}_\text{AUTH}$: simulates the ACAP game honestly. If $\mathcal{A}$
+outputs $c^*$ that decrypts correctly under $SS$ to a payload different from the original,
+outputs $(c^*, \eta)$ as an AEAD forgery.
+
+Both reductions are PPT. By the union bound:
+
+$$\mathsf{Adv}^{\text{ACAP}}_\mathcal{A}(\lambda) \leq
+  \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) +
+  \mathsf{Adv}^{\text{AUTH}}_{\text{AEAD}}(\lambda) \qquad \square$$
+
+**Consequence.** A receiver cannot modify the access policy to grant itself broader
+materialization rights (e.g., converting a one-shot policy to unrestricted). Similarly,
+an adversary intercepting the sealed key cannot widen the policy. The sender's chosen
+policy is cryptographically bound to the receiver and entity it was issued for.
+
+---
+
+#### 3.3.9 Multi-Receiver Independence
+
+When a sender issues lattice keys to multiple receivers for the same entity, the CEK is
+sealed independently to each receiver's encapsulation key via independent ML-KEM
+encapsulations. This theorem formalizes that compromising one receiver's decapsulation key
+does not expose any other receiver's sealed key.
+
+**Definition (MRIND game).**
+
+```
+Game MRIND:
+  1. Challenger sets up m receivers R_1, ..., R_m with independent ML-KEM
+     keypairs (ek_1, dk_1), ..., (ek_m, dk_m).
+  2. Sender commits entity e with CEK. For each receiver i, challenger seals
+     an independent lattice key:
+       (SS_i, ct_i) ← Encaps(ek_i)
+       sealed_key_i = (ct_i, AEAD_{SS_i}(inner_payload_i))
+     All inner_payload_i carry the same CEK (same entity, same access rights).
+  3. Adversary A receives all m sealed keys and dk_1, ..., dk_{m-1}
+     (the DKs of all receivers except R_m).
+  4. A outputs a candidate CEK for R_m's sealed key.
+  5. A wins if the output equals CEK.
+```
+
+**Theorem 11 (Multi-Receiver Independence).** For any PPT adversary $\mathcal{A}$
+and any $m \geq 2$:
+
+$$\mathsf{Adv}^{\text{MRIND}}_\mathcal{A}(\lambda) \leq
+  \mathsf{Adv}^{\text{IND-CCA}}_{\text{ML-KEM}}(\lambda) +
+  \mathsf{Adv}^{\text{IND-CPA}}_{\text{AEAD}}(\lambda)$$
+
+*Proof.* $\mathcal{A}$ holds $dk_1, \ldots, dk_{m-1}$ and all $m$ sealed keys. Using the
+known DKs, $\mathcal{A}$ runs $\mathsf{Decaps}(dk_i, ct_i)$ to recover $SS_i$ for $i < m$,
+then AEAD-decrypts the first $m-1$ inner payloads — all of which contain the same CEK.
+The question is whether this helps recover $SS_m$ from $ct_m$ or otherwise break
+$R_m$'s sealed key.
+
+Each $SS_i \leftarrow \mathsf{Encaps}(ek_i)$ uses independent fresh randomness. The
+encapsulation randomness for receiver $i$ is statistically independent of that for $j \neq i$.
+Even knowing CEK from the first $m-1$ inner payloads does not help: $R_m$'s inner payload
+is AEAD-encrypted under $SS_m$, which is an independent random value derived from $ek_m$
+and fresh ephemeral randomness.
+
+**Reduction $\mathcal{B}$:** receives ML-KEM IND-CCA challenge $(ek^*, ct^*, K^*)$ and
+decapsulation oracle $\mathsf{Decaps}_{dk^*}(\cdot)$ for $ct \neq ct^*$.
+
+1. Set $ek_m = ek^*$. Generate all other receiver keypairs $(ek_i, dk_i)$ for $i < m$
+   honestly.
+2. Run MRIND. Give $\mathcal{A}$ the DKs $dk_1, \ldots, dk_{m-1}$ and $m$ sealed keys,
+   where $R_m$'s sealed key uses $ct^*$ and encrypts inner\_payload under $K^*$.
+   Forward any decapsulation queries for $ct \neq ct^*$ to $\mathsf{Decaps}_{dk^*}$.
+3. $\mathcal{A}$ may decapsulate $ct_1, \ldots, ct_{m-1}$ directly using $dk_1, \ldots,
+   dk_{m-1}$, recovering $SS_1, \ldots, SS_{m-1}$ and CEK. But $SS_m = K^*$ is
+   either the real shared secret or random.
+4. If $\mathcal{A}$ outputs CEK: since inner\_payload for $R_m$ is
+   $\mathsf{AEAD}_{K^*}(\text{inner\_payload}_m)$, recovering CEK from this ciphertext
+   without knowing $K^*$ requires either breaking IND-CCA (recovering $K^*$ from $ct^*$
+   without $dk^*$) or breaking AEAD IND-CPA. If $K^*$ is random and independent of CEK,
+   the AEAD ciphertext is computationally independent of CEK by AEAD IND-CPA security.
+   $\mathcal{B}$ outputs $1$ if $\mathcal{A}$ wins, else $0$.
+
+$\Pr[\mathcal{B} \text{ wins IND-CCA}] \geq \Pr[\mathcal{A} \text{ wins MRIND}] -
+\mathsf{Adv}^{\text{IND-CPA}}_\text{AEAD}$, giving the stated bound. ∎
+
+**Practical consequence.** In any multi-receiver deployment, each receiver's sealed key is
+independently secure. Compromise of any subset of receivers' DKs does not expose the
+remaining receivers' transfers. Revocation is per-receiver: the sender re-seals to a new
+keypair for any compromised receiver; other receivers' sealed keys remain valid and
+unaffected.
+
+---
+
+#### 3.3.10 What Cannot Be Formally Proven
 
 | Claim | Why It Cannot Be Proven | Status |
 |-------|------------------------|--------|
@@ -1090,6 +1466,8 @@ while BLAKE3-256 provides ~85-bit post-quantum collision resistance (BHT bound) 
 | "Sub-latency transfer" | O(1) key size is proven; O(1) total latency is not. MATERIALIZE fetches O(entity) data. | Reframed as "bottleneck relocation" |
 | "Secure without trust" | Requires honest append-only log and ≥ k honest shard replicas. These ARE trust assumptions. | Acknowledged in §5.1 |
 | "Permanent storage" | Requires economic incentives to sustain nodes. Without incentives, rational nodes evict data. | Acknowledged in §5.4.4, §5.5 |
+| "Full forward secrecy" | Theorem 9 proves sender-side forward secrecy only. Compromise of a receiver's DK allows retrospective decapsulation of all historical sealed keys issued to that ek. Static-key KEMs do not provide forward secrecy against the decapsulating party. | Acknowledged in §3.3.7; mitigated by keypair rotation and HSM storage of dk |
+| "Policy enforcement without trusted nodes" | Theorem 10 proves policy integrity (the policy cannot be forged). Policy enforcement (one-shot counting, TTL expiry) requires stateful tracking by the commitment layer. | Acknowledged in §3.3.8; requires deployment-level enforcement |
 
 ---
 
@@ -1097,7 +1475,7 @@ while BLAKE3-256 provides ~85-bit post-quantum collision resistance (BHT bound) 
 
 > **Informal Summary.** This section provides an accessible explanation of LTP's immutability
 > properties for readers who want intuition before the formalism. The authoritative security
-> definitions and game-based proofs are in §3.3 (Theorems 3–8). Formal statements, reduction
+> definitions and game-based proofs are in §3.3 (Theorems 3–11). Formal statements, reduction
 > bounds, and concrete security parameters are in §3.3; this section provides cross-references
 > and prose context only.
 
